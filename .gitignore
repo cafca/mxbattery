@@ -3,6 +3,8 @@
 *.swp
 
 # probe binaries (sources kept; binaries regenerable)
+/probe-a/logi-battery-probe-a.app
+/probe-a/logi-battery-probe-a
 /probe-a/probe
 /probe-a/*.dSYM
 /probe-b/logi-mx-battery
