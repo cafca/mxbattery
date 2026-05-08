@@ -22,6 +22,7 @@ objc2-foundation = { version = "0.2", features = ["all"] }
 objc2-app-kit = { version = "0.2", features = ["all"] }
 objc2-core-bluetooth = { version = "0.2", features = ["all"] }
 objc2-user-notifications = { version = "0.2", features = ["all"] }
+block2 = "0.5"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "macros", "signal", "time", "io-util", "net", "fs"] }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
