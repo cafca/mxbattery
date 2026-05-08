@@ -4,6 +4,7 @@ pub mod config;
 pub mod device_filter;
 pub mod hidpp;
 pub mod logging;
+pub mod notifier;
 pub mod paths;
 pub mod state;
 
