@@ -101,6 +101,43 @@ unsafe fn write_vendor(peripheral: &CBPeripheral, char_ptr: *mut CBCharacteristi
 }
 
 // ---------------------------------------------------------------------------
+// Shape-probe timeout via dispatch2 (GCD main queue)
+// ---------------------------------------------------------------------------
+
+/// Advance to the next frame shape.  Returns `true` if a new shape is
+/// available; `false` if all three shapes have been exhausted.
+fn try_next_shape(st: &mut PeriphState) -> bool {
+    st.pending_resolve_swid = None;
+    st.feature_index_1000 = None;
+    match st.shape {
+        FrameShape::NoDevIdx18 => {
+            st.shape = FrameShape::WithDevIdx19;
+            true
+        }
+        FrameShape::WithDevIdx19 => {
+            st.shape = FrameShape::WithReportId20;
+            true
+        }
+        FrameShape::WithReportId20 => {
+            tracing::warn!(
+                "HID++ frame-shape probe exhausted — cannot determine battery-status feature"
+            );
+            false
+        }
+    }
+}
+
+// NOTE: A 2-second response timeout for shape probing is not yet implemented.
+// The shape is only advanced on a CBATTErrorDomain Code=13 write error.
+// To add the timeout, we would need to schedule a callback on the GCD main
+// queue after 2 seconds (e.g. via `dispatch_after_f`).  The obstacle is that
+// `dispatch2 = "0.3"` requires `objc2 >= 0.6`, which conflicts with this
+// project's `objc2 = "0.5"`.  When the project upgrades to `objc2 0.6`,
+// replace the error-only path below with a proper `DispatchQueue::main().after`
+// call and set `pending_resolve_swid = None` in the timeout if it has not been
+// cleared already. (DONE_WITH_CONCERNS: 2-second timeout not implemented)
+
+// ---------------------------------------------------------------------------
 // Per-peripheral state
 // ---------------------------------------------------------------------------
 
@@ -651,8 +688,68 @@ declare_class!(
                         swid, pid
                     );
                     write_vendor(peripheral, ptr, frame);
+                    // NOTE: 2-second response timeout not implemented here; see
+                    // DONE_WITH_CONCERNS comment above try_next_shape.
+                    // Shape advancement happens only on CBATTErrorDomain Code=13.
                 }
                 return;
+            }
+        }
+
+        /// Called after a WriteWithResponse write completes (or fails).
+        /// On `CBATTErrorDomain Code=13` (invalid value length) for the vendor
+        /// char, advance the frame shape and retry the GetFeature probe.
+        #[method(peripheral:didWriteValueForCharacteristic:error:)]
+        unsafe fn peripheral_didWriteValueForCharacteristic_error(
+            &self,
+            peripheral: &CBPeripheral,
+            characteristic: &CBCharacteristic,
+            error: Option<&objc2_foundation::NSError>,
+        ) {
+            let cuuid = characteristic.UUID();
+            if !uuid_matches(&cuuid, UUID_VENDOR_CHAR) {
+                return;
+            }
+            let error = match error {
+                Some(e) => e,
+                None => return, // write succeeded
+            };
+
+            let pid = peripheral.identifier().UUIDString().to_string();
+            let code = error.code();
+            tracing::debug!(
+                "vendor char write error for {} code={}: {}",
+                pid, code, error
+            );
+
+            // CBATTErrorDomain Code=13 == kCBATTErrorInvalidAttributeLength
+            if code != 13 {
+                return;
+            }
+
+            let (advanced, frame, vendor_ptr) = {
+                let mut inner = self.ivars().lock().unwrap();
+                let st = match inner.peripherals.get_mut(&pid) {
+                    Some(s) => s,
+                    None => return,
+                };
+                if !try_next_shape(st) {
+                    return; // all shapes exhausted
+                }
+                let swid = next_swid(&mut st.swid_counter);
+                st.pending_resolve_swid = Some(swid);
+                let frame = crate::hidpp::encode_get_feature(
+                    st.shape,
+                    crate::hidpp::FEATURE_BATTERY_STATUS,
+                    swid,
+                );
+                (true, frame, st.char_vendor.unwrap_or(std::ptr::null_mut()))
+            };
+
+            if advanced {
+                write_vendor(peripheral, vendor_ptr, frame);
+                // NOTE: 2-second timeout not re-scheduled after error-driven shape advance.
+                // See DONE_WITH_CONCERNS comment near try_next_shape.
             }
         }
     }
