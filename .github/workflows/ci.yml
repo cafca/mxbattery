@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  test:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+          targets: aarch64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - name: rustfmt
+        run: cargo fmt --all -- --check
+      - name: clippy
+        run: cargo clippy --all-targets --all-features --locked
+      - name: test
+        run: cargo test --all-features --locked
+      - name: build release binary
+        run: cargo build --release --locked
+      - name: assemble .app bundle
+        run: ./tools/make-app.sh
+      - name: smoke check
+        run: ./target/release/MXBattery.app/Contents/MacOS/mxbattery --help
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MXBattery.app
+          path: target/release/MXBattery.app
+          if-no-files-found: error

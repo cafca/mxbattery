@@ -1,0 +1,50 @@
+[package]
+name = "mxbattery"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.78"
+license = "MIT"
+description = "Battery level + charging notifier for Logitech BLE mice on macOS"
+repository = "https://github.com/cafca/mxbattery"
+default-run = "mxbattery"
+
+[[bin]]
+name = "mxbattery"
+path = "src/main.rs"
+
+[lib]
+name = "mxbattery"
+path = "src/lib.rs"
+
+[dependencies]
+objc2 = "0.5"
+objc2-foundation = { version = "0.2", features = ["all"] }
+objc2-app-kit = { version = "0.2", features = ["all"] }
+objc2-core-bluetooth = { version = "0.2", features = ["all"] }
+objc2-user-notifications = { version = "0.2", features = ["all"] }
+block2 = "0.5"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "macros", "signal", "time", "io-util", "net", "fs"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+serde_json = "1"
+arc-swap = "1"
+notify = "6"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "time", "chrono"] }
+tempfile = "3"
+dirs = "5"
+anyhow = "1"
+thiserror = "1"
+humantime-serde = "1"
+libc = "0.2"
+
+[dev-dependencies]
+pretty_assertions = "1"
+hex = "0.4"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

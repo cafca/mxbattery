@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>      <string>com.vincentahrend.mxbattery-app</string>
+    <key>CFBundleName</key>            <string>MXBattery</string>
+    <key>CFBundleDisplayName</key>     <string>MXBattery</string>
+    <key>CFBundleExecutable</key>      <string>mxbattery</string>
+    <key>CFBundleIconFile</key>        <string>AppIcon</string>
+    <key>CFBundlePackageType</key>     <string>APPL</string>
+    <key>CFBundleShortVersionString</key><string>__VERSION__</string>
+    <key>CFBundleVersion</key>         <string>__VERSION__</string>
+    <key>LSMinimumSystemVersion</key>  <string>14.0</string>
+    <key>LSUIElement</key>             <true/>
+    <key>NSBluetoothAlwaysUsageDescription</key>
+    <string>Reads battery level and charging state from your Logitech mouse over Bluetooth.</string>
+    <key>NSHumanReadableCopyright</key><string>(c) 2026 Vincent Ahrend. MIT licensed.</string>
+</dict>
+</plist>
