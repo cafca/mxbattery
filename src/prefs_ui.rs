@@ -923,6 +923,13 @@ impl PrefsWindow {
             .and_then(|p| Config::load(&p.config_file()).ok())
             .unwrap_or_default();
 
+        // Activate the app first so the window comes to the foreground regardless
+        // of which window currently has focus. Required for LSUIElement apps
+        // because they don't auto-activate when their windows order front.
+        let app = NSApplication::sharedApplication(mtm);
+        #[allow(deprecated)]
+        app.activateIgnoringOtherApps(true);
+
         CACHE.with(|cell| {
             // Take the option out
             let existing = cell.take();

@@ -79,10 +79,16 @@ impl MenuTarget {
     }
 
     fn send(&self, cmd: MenubarCommand) {
+        tracing::info!(?cmd, "menubar: click");
         // Take temporarily, send, put back.
         let opt = self.ivars().sender.take();
         if let Some(ref tx) = opt {
-            let _ = tx.send(cmd);
+            match tx.send(cmd) {
+                Ok(()) => tracing::debug!("menubar: command dispatched"),
+                Err(e) => tracing::warn!(?e, "menubar: send failed"),
+            }
+        } else {
+            tracing::warn!("menubar: no sender set; click dropped");
         }
         self.ivars().sender.set(opt);
     }
@@ -117,6 +123,22 @@ impl MenubarIcon {
         let (menu, mute_item) = build_menu(&target, mtm);
         unsafe { item.setMenu(Some(&menu)) };
 
+        // Render an initial placeholder icon so the status item is visible
+        // before the first battery reading arrives. Without this the button
+        // has no image and shows nothing.
+        let img = render_icon(0, ChargingState::Unknown);
+        unsafe {
+            match item.button(mtm) {
+                Some(button) => {
+                    button.setImage(Some(&img));
+                    tracing::info!("menubar: status item button installed with placeholder icon");
+                }
+                None => {
+                    tracing::warn!("menubar: NSStatusItem.button(mtm) returned None — icon will not be visible");
+                }
+            }
+        }
+
         Self {
             item,
             _target: target,
@@ -130,10 +152,13 @@ impl MenubarIcon {
     }
 
     pub fn render(&self, percent: u8, charging: ChargingState, mtm: MainThreadMarker) {
+        tracing::debug!(percent, ?charging, "menubar: rendering");
         let img = render_icon(percent, charging);
         unsafe {
             if let Some(button) = self.item.button(mtm) {
                 button.setImage(Some(&img));
+            } else {
+                tracing::warn!("menubar: button(mtm) None during render");
             }
         }
     }
