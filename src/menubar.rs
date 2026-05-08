@@ -107,6 +107,8 @@ pub struct MenubarIcon {
     _target: Retained<MenuTarget>,
     /// Strong ref to the "Mute today" menu item for dynamic label updates.
     mute_item: Retained<NSMenuItem>,
+    /// Strong ref to the disabled status row showing current battery percent + state.
+    status_item: Retained<NSMenuItem>,
 }
 
 impl MenubarIcon {
@@ -120,7 +122,7 @@ impl MenubarIcon {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let target = MenuTarget::new(tx);
 
-        let (menu, mute_item) = build_menu(&target, mtm);
+        let (menu, mute_item, status_item) = build_menu(&target, mtm);
         unsafe { item.setMenu(Some(&menu)) };
 
         // Render an initial placeholder icon so the status item is visible
@@ -143,6 +145,7 @@ impl MenubarIcon {
             item,
             _target: target,
             mute_item,
+            status_item,
         }
     }
 
@@ -160,6 +163,8 @@ impl MenubarIcon {
             } else {
                 tracing::warn!("menubar: button(mtm) None during render");
             }
+            self.status_item
+                .setTitle(&NSString::from_str(&format_status(percent, charging)));
         }
     }
 
@@ -182,18 +187,43 @@ impl MenubarIcon {
 fn build_menu(
     target: &MenuTarget,
     mtm: MainThreadMarker,
-) -> (Retained<NSMenu>, Retained<NSMenuItem>) {
+) -> (Retained<NSMenu>, Retained<NSMenuItem>, Retained<NSMenuItem>) {
     let menu = unsafe { NSMenu::initWithTitle(mtm.alloc::<NSMenu>(), &NSString::from_str("")) };
+
+    // Disabled informational row at the top showing the current reading.
+    let status_item = unsafe {
+        NSMenuItem::initWithTitle_action_keyEquivalent(
+            mtm.alloc::<NSMenuItem>(),
+            &NSString::from_str("Battery: —"),
+            None,
+            &NSString::from_str(""),
+        )
+    };
+    unsafe { status_item.setEnabled(false) };
+
+    let separator = NSMenuItem::separatorItem(mtm);
 
     let mute_item = make_item("Mute today", sel!(handleMuteToday:), target, mtm);
     let prefs_item = make_item("Preferences\u{2026}", sel!(handlePrefs:), target, mtm);
     let quit_item = make_item("Quit", sel!(handleQuit:), target, mtm);
 
+    menu.addItem(&status_item);
+    menu.addItem(&separator);
     menu.addItem(&mute_item);
     menu.addItem(&prefs_item);
     menu.addItem(&quit_item);
 
-    (menu, mute_item)
+    (menu, mute_item, status_item)
+}
+
+fn format_status(percent: u8, charging: ChargingState) -> String {
+    let suffix = match charging {
+        ChargingState::Recharging | ChargingState::ChargeInFinalState => " — charging",
+        ChargingState::ChargeComplete => " — fully charged",
+        ChargingState::Discharging => "",
+        ChargingState::Unknown => " — connecting…",
+    };
+    format!("Battery: {}%{}", percent, suffix)
 }
 
 fn make_item(
