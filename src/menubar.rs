@@ -2,30 +2,133 @@
 //!
 //! Draws a custom battery glyph as a template NSImage so it inverts
 //! automatically in dark mode, and shows a bolt overlay when charging.
+//! Also installs a click menu with Mute today / Preferences / Quit items.
+
+use std::cell::Cell;
 
 use block2::RcBlock;
+use objc2::mutability::InteriorMutable;
 use objc2::rc::Retained;
 use objc2::runtime::Bool;
+use objc2::{declare_class, msg_send_id, sel, ClassType, DeclaredClass};
 use objc2_app_kit::{
-    NSBezierPath, NSColor, NSImage, NSStatusBar, NSStatusItem, NSVariableStatusItemLength,
+    NSBezierPath, NSColor, NSImage, NSMenu, NSMenuItem, NSStatusBar, NSStatusItem,
+    NSVariableStatusItemLength,
 };
-use objc2_foundation::{CGFloat, MainThreadMarker, NSPoint, NSRect, NSSize};
+use objc2_foundation::{
+    CGFloat, MainThreadMarker, NSObject, NSPoint, NSRect, NSSize, NSString,
+};
+use tokio::sync::mpsc::UnboundedSender;
 
 use crate::state::ChargingState;
+
+// ---------------------------------------------------------------------------
+// Public command type
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug)]
+pub enum MenubarCommand {
+    ToggleMuteToday,
+    OpenPrefs,
+    Quit,
+}
+
+// ---------------------------------------------------------------------------
+// ObjC MenuTarget class
+// ---------------------------------------------------------------------------
+
+struct MenuTargetIvars {
+    sender: Cell<Option<UnboundedSender<MenubarCommand>>>,
+}
+
+declare_class!(
+    struct MenuTarget;
+
+    unsafe impl ClassType for MenuTarget {
+        type Super = NSObject;
+        type Mutability = InteriorMutable;
+        const NAME: &'static str = "MXBatteryMenuTarget";
+    }
+
+    impl DeclaredClass for MenuTarget {
+        type Ivars = MenuTargetIvars;
+    }
+
+    unsafe impl MenuTarget {
+        #[method(handleMuteToday:)]
+        fn handle_mute_today(&self, _sender: *mut NSObject) {
+            self.send(MenubarCommand::ToggleMuteToday);
+        }
+
+        #[method(handlePrefs:)]
+        fn handle_prefs(&self, _sender: *mut NSObject) {
+            self.send(MenubarCommand::OpenPrefs);
+        }
+
+        #[method(handleQuit:)]
+        fn handle_quit(&self, _sender: *mut NSObject) {
+            self.send(MenubarCommand::Quit);
+        }
+    }
+);
+
+impl MenuTarget {
+    fn new(sender: UnboundedSender<MenubarCommand>) -> Retained<Self> {
+        let this = Self::alloc().set_ivars(MenuTargetIvars {
+            sender: Cell::new(Some(sender)),
+        });
+        unsafe { msg_send_id![super(this), init] }
+    }
+
+    fn send(&self, cmd: MenubarCommand) {
+        // Take temporarily, send, put back.
+        let opt = self.ivars().sender.take();
+        if let Some(ref tx) = opt {
+            let _ = tx.send(cmd);
+        }
+        self.ivars().sender.set(opt);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Public MenubarIcon struct
+// ---------------------------------------------------------------------------
 
 const ICON_W: CGFloat = 22.0;
 const ICON_H: CGFloat = 14.0;
 
 pub struct MenubarIcon {
     item: Retained<NSStatusItem>,
+    /// Held alive so it doesn't get deallocated while the menu exists.
+    _target: Retained<MenuTarget>,
+    /// Strong ref to the "Mute today" menu item for dynamic label updates.
+    mute_item: Retained<NSMenuItem>,
 }
 
 impl MenubarIcon {
-    pub fn install(_mtm: MainThreadMarker) -> Self {
+    pub fn install(mtm: MainThreadMarker) -> Self {
         let bar = unsafe { NSStatusBar::systemStatusBar() };
         let item: Retained<NSStatusItem> =
             unsafe { bar.statusItemWithLength(NSVariableStatusItemLength) };
-        Self { item }
+
+        // Build a dummy target without a real channel (install replaces it
+        // when set_command_channel is called).
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let target = MenuTarget::new(tx);
+
+        let (menu, mute_item) = build_menu(&target, mtm);
+        unsafe { item.setMenu(Some(&menu)) };
+
+        Self {
+            item,
+            _target: target,
+            mute_item,
+        }
+    }
+
+    /// Wire the menu items to send commands on `sender`.
+    pub fn set_command_channel(&self, sender: UnboundedSender<MenubarCommand>) {
+        self._target.ivars().sender.set(Some(sender));
     }
 
     pub fn render(&self, percent: u8, charging: ChargingState, mtm: MainThreadMarker) {
@@ -37,11 +140,63 @@ impl MenubarIcon {
         }
     }
 
+    /// Update the "Mute today" item label based on muted state.
+    pub fn set_muted(&self, muted: bool) {
+        let title = if muted { "Unmute" } else { "Mute today" };
+        unsafe { self.mute_item.setTitle(&NSString::from_str(title)) };
+    }
+
     pub fn remove(self) {
         let bar = unsafe { NSStatusBar::systemStatusBar() };
         unsafe { bar.removeStatusItem(&self.item) };
     }
 }
+
+// ---------------------------------------------------------------------------
+// Menu construction
+// ---------------------------------------------------------------------------
+
+fn build_menu(
+    target: &MenuTarget,
+    mtm: MainThreadMarker,
+) -> (Retained<NSMenu>, Retained<NSMenuItem>) {
+    let menu =
+        unsafe { NSMenu::initWithTitle(mtm.alloc::<NSMenu>(), &NSString::from_str("")) };
+
+    let mute_item = make_item("Mute today", sel!(handleMuteToday:), target, mtm);
+    let prefs_item = make_item("Preferences\u{2026}", sel!(handlePrefs:), target, mtm);
+    let quit_item = make_item("Quit", sel!(handleQuit:), target, mtm);
+
+    menu.addItem(&mute_item);
+    menu.addItem(&prefs_item);
+    menu.addItem(&quit_item);
+
+    (menu, mute_item)
+}
+
+fn make_item(
+    title: &str,
+    action: objc2::runtime::Sel,
+    target: &MenuTarget,
+    mtm: MainThreadMarker,
+) -> Retained<NSMenuItem> {
+    let item = unsafe {
+        NSMenuItem::initWithTitle_action_keyEquivalent(
+            mtm.alloc::<NSMenuItem>(),
+            &NSString::from_str(title),
+            Some(action),
+            &NSString::from_str(""),
+        )
+    };
+    unsafe {
+        item.setTarget(Some(target as &_ as &objc2::runtime::AnyObject));
+    }
+    item
+}
+
+// ---------------------------------------------------------------------------
+// Icon rendering
+// ---------------------------------------------------------------------------
 
 fn render_icon(percent: u8, charging: ChargingState) -> Retained<NSImage> {
     let size = NSSize {
@@ -52,9 +207,8 @@ fn render_icon(percent: u8, charging: ChargingState) -> Retained<NSImage> {
         draw_battery(percent, charging);
         Bool::YES
     });
-    let img: Retained<NSImage> = unsafe {
-        NSImage::imageWithSize_flipped_drawingHandler(size, false, &block)
-    };
+    let img: Retained<NSImage> =
+        unsafe { NSImage::imageWithSize_flipped_drawingHandler(size, false, &block) };
     unsafe { img.setTemplate(true) };
     img
 }
