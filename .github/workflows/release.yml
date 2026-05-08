@@ -1,0 +1,28 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    runs-on: macos-14
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - name: build .app bundle (ad-hoc signed)
+        run: ./tools/make-app.sh
+      - name: zip
+        run: |
+          cd target/release
+          zip -r MXBattery.app.zip MXBattery.app
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: target/release/MXBattery.app.zip
+          generate_release_notes: true
