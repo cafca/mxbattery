@@ -1,6 +1,8 @@
 use crate::state::ChargingState;
 use tokio::sync::broadcast;
 
+#[cfg(target_os = "macos")]
+pub mod cb;
 pub mod mock;
 
 #[derive(Clone, Debug)]
