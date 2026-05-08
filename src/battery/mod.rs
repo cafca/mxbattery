@@ -35,12 +35,17 @@ pub fn handle_vendor_bytes(
     let Some(frame) = hidpp::decode(shape, bytes) else {
         return VendorOutcome::Ignored;
     };
-    if frame.is_event() {
-        if Some(frame.feature_index) == *feature_index_1000 {
-            if let Some((_, _, raw)) = hidpp::decode_battery_status(&frame.params) {
-                return VendorOutcome::Charging(map_charging(raw));
-            }
+    // BatteryStatus frame on the resolved feature index — could be a spontaneous
+    // event (swid=0) or the response to our seed `getBatteryLevelStatus` call
+    // (swid != 0). Either way, decode and emit Charging. Restricted to fn=0
+    // (getBatteryLevelStatus / its event) so other functions on the same
+    // feature index don't get misinterpreted.
+    if Some(frame.feature_index) == *feature_index_1000 && frame.function == 0 {
+        if let Some((_, _, raw)) = hidpp::decode_battery_status(&frame.params) {
+            return VendorOutcome::Charging(map_charging(raw));
         }
+    }
+    if frame.is_event() {
         return VendorOutcome::Ignored;
     }
     if frame.feature_index == hidpp::ROOT_FEATURE_INDEX

@@ -183,6 +183,7 @@ pub fn run_daemon() -> anyhow::Result<()> {
                         unsafe { (*menubar_ptr).render(percent, charging, mtm_inner) };
                     }
                     MainMsg::OpenPrefs => {
+                        tracing::info!("app: dispatching OpenPrefs to PrefsWindow on main thread");
                         crate::prefs_ui::PrefsWindow::show_or_focus(mtm_inner);
                     }
                     MainMsg::SetMuted(muted) => {
@@ -190,6 +191,7 @@ pub fn run_daemon() -> anyhow::Result<()> {
                         unsafe { (*menubar_ptr).set_muted(muted) };
                     }
                     MainMsg::Quit => {
+                        tracing::info!("app: terminating on user request");
                         let app = objc2_app_kit::NSApplication::sharedApplication(mtm_inner);
                         unsafe { app.terminate(None) };
                     }

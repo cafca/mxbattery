@@ -226,6 +226,15 @@ struct Inner {
     filter: DeviceFilter,
     /// Map from peripheral UUID string → per-peripheral state.
     peripherals: HashMap<String, PeriphState>,
+    /// Strong references to CBPeripheral objects we want to connect to. CoreBluetooth
+    /// requires the caller to hold a retain on the peripheral until didConnect fires;
+    /// without this, the peripheral is released between `connectPeripheral_options` and
+    /// the callback, and the callback never runs.
+    /// Stored as raw pointers (with retain count incremented via `Retained::into_raw`)
+    /// because `Retained<CBPeripheral>` is `!Send` but `Inner` must be `Send`.
+    /// Released by `Inner::Drop`.
+    /// SAFETY: only accessed on the main dispatch queue.
+    retained_peripherals: HashMap<String, *mut CBPeripheral>,
 }
 
 impl Inner {
@@ -235,6 +244,7 @@ impl Inner {
             tx,
             filter,
             peripherals: HashMap::new(),
+            retained_peripherals: HashMap::new(),
         }
     }
 
@@ -243,6 +253,25 @@ impl Inner {
         let _ = self.tx.send(ev);
     }
 }
+
+impl Drop for Inner {
+    fn drop(&mut self) {
+        for (_, raw) in self.retained_peripherals.drain() {
+            // SAFETY: raw was produced by Retained::into_raw; from_raw rebuilds
+            // the Retained which then releases the +1 on drop.
+            unsafe {
+                let _ = Retained::<CBPeripheral>::from_raw(raw);
+            }
+        }
+    }
+}
+
+// SAFETY: the raw `*mut CBPeripheral` pointers are only ever dereferenced on the
+// CoreBluetooth main dispatch queue (the same queue that locks the Mutex), so
+// there is no cross-thread access to the Objective-C objects despite the type
+// system's `!Send + !Sync` inference for raw pointers.
+unsafe impl Send for Inner {}
+unsafe impl Sync for Inner {}
 
 // ---------------------------------------------------------------------------
 // Objective-C delegate class
@@ -294,6 +323,27 @@ declare_class!(
             for p in found.iter() {
                 let pid = p.identifier().UUIDString().to_string();
                 tracing::debug!("connecting peripheral {}", pid);
+
+                // Retain the peripheral so it survives until didConnect fires.
+                // CoreBluetooth does not take a strong ref on connectPeripheral_options;
+                // if we drop the only ref (held by `found`) at end of this method,
+                // the callback never fires.
+                // SAFETY: p is a non-null reference to a live ObjC object.
+                let retained: Retained<CBPeripheral> = unsafe {
+                    Retained::retain(p as *const CBPeripheral as *mut CBPeripheral)
+                        .expect("retain returned nil for live peripheral")
+                };
+                let raw: *mut CBPeripheral = Retained::into_raw(retained);
+                {
+                    let mut inner = self.ivars().lock().unwrap();
+                    if let Some(prev) = inner.retained_peripherals.insert(pid.clone(), raw) {
+                        // Drop any previous retain.
+                        unsafe {
+                            let _ = Retained::<CBPeripheral>::from_raw(prev);
+                        }
+                    }
+                }
+
                 p.setDelegate(Some(ProtocolObject::from_ref(self)));
                 central.connectPeripheral_options(p, None);
             }

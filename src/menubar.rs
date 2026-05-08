@@ -79,10 +79,16 @@ impl MenuTarget {
     }
 
     fn send(&self, cmd: MenubarCommand) {
+        tracing::info!(?cmd, "menubar: click");
         // Take temporarily, send, put back.
         let opt = self.ivars().sender.take();
         if let Some(ref tx) = opt {
-            let _ = tx.send(cmd);
+            match tx.send(cmd) {
+                Ok(()) => tracing::debug!("menubar: command dispatched"),
+                Err(e) => tracing::warn!(?e, "menubar: send failed"),
+            }
+        } else {
+            tracing::warn!("menubar: no sender set; click dropped");
         }
         self.ivars().sender.set(opt);
     }
