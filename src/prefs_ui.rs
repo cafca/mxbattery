@@ -4,6 +4,7 @@
 //! The window is created once and re-shown on subsequent calls.
 
 use std::cell::Cell;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use objc2::mutability::MainThreadOnly;
@@ -58,6 +59,13 @@ struct PrefsTargetIvars {
 
     // The window itself (not retained — the WindowCache holds the Retained)
     window: Cell<*mut NSWindow>,
+
+    // Original warn_period from the config loaded at form-open time.
+    // Preserved so Save doesn't clobber it with a hardcoded 24h value.
+    original_warn_period: Mutex<Duration>,
+
+    // Original autostart.enabled so Save can detect changes and call launchd.
+    original_autostart_enabled: Cell<bool>,
 }
 
 // SAFETY: All raw pointers are only ever dereferenced on the main thread.
@@ -150,6 +158,8 @@ impl PrefsTarget {
             autostart_check: Cell::new(std::ptr::null_mut()),
             save_button: Cell::new(std::ptr::null_mut()),
             window: Cell::new(std::ptr::null_mut()),
+            original_warn_period: Mutex::new(Duration::from_secs(24 * 60 * 60)),
+            original_autostart_enabled: Cell::new(false),
         };
         let this = mtm.alloc::<Self>().set_ivars(ivars);
         unsafe { msg_send_id![super(this), init] }
@@ -164,10 +174,53 @@ impl PrefsTarget {
 
     fn save_config(&self) {
         let config = self.build_config();
+        let prev_autostart = self.ivars().original_autostart_enabled.get();
+        let new_autostart = config.autostart.enabled;
         match Paths::standard() {
             Ok(paths) => {
                 if let Err(e) = config.save(&paths.config_file()) {
                     tracing::error!(?e, "failed to save config");
+                    return;
+                }
+                // Call launchd if the autostart setting changed.
+                if new_autostart != prev_autostart {
+                    if new_autostart {
+                        // Derive the .app bundle path from the running binary.
+                        // The binary lives at …/MXBattery.app/Contents/MacOS/mxbattery,
+                        // so .parent().parent().parent() is the .app directory.
+                        match std::env::current_exe() {
+                            Ok(exe) => {
+                                let app_path = exe
+                                    .parent()
+                                    .and_then(|p| p.parent())
+                                    .and_then(|p| p.parent())
+                                    .map(|p| p.to_path_buf());
+                                match app_path {
+                                    Some(ref p)
+                                        if p.extension().and_then(|e| e.to_str())
+                                            == Some("app") =>
+                                    {
+                                        if let Err(e) =
+                                            crate::launchd::install(&p.to_string_lossy())
+                                        {
+                                            tracing::warn!(?e, "launchd install failed");
+                                        }
+                                    }
+                                    _ => tracing::warn!(
+                                        "running unbundled — skipping launchd install"
+                                    ),
+                                }
+                            }
+                            Err(e) => tracing::warn!(
+                                ?e,
+                                "current_exe() failed — skipping launchd install"
+                            ),
+                        }
+                    } else if let Err(e) = crate::launchd::uninstall(false) {
+                        tracing::warn!(?e, "launchd uninstall failed");
+                    }
+                    // Update the stored original so a re-save doesn't call launchd again.
+                    self.ivars().original_autostart_enabled.set(new_autostart);
                 }
             }
             Err(e) => tracing::error!(?e, "failed to resolve paths"),
@@ -198,9 +251,12 @@ impl PrefsTarget {
             let rearm_hysteresis = (*self.ivars().rearm_stepper.get()).doubleValue() as u8;
             let period_mins = (*self.ivars().critical_period_stepper.get()).doubleValue() as u64;
 
-            let menubar_enabled = (*self.ivars().menubar_check.get()).state() == NSControlStateValueOn;
-            let autostart_enabled = (*self.ivars().autostart_check.get()).state() == NSControlStateValueOn;
+            let menubar_enabled =
+                (*self.ivars().menubar_check.get()).state() == NSControlStateValueOn;
+            let autostart_enabled =
+                (*self.ivars().autostart_check.get()).state() == NSControlStateValueOn;
 
+            let warn_period = *self.ivars().original_warn_period.lock().unwrap();
             Config {
                 schema_version: 1,
                 device,
@@ -212,11 +268,15 @@ impl PrefsTarget {
                     critical_enabled,
                 },
                 cadence: Cadence {
-                    warn_period: Duration::from_secs(24 * 60 * 60),
+                    warn_period,
                     critical_period: Duration::from_secs(period_mins * 60),
                 },
-                menubar: MenubarConfig { enabled: menubar_enabled },
-                autostart: Autostart { enabled: autostart_enabled },
+                menubar: MenubarConfig {
+                    enabled: menubar_enabled,
+                },
+                autostart: Autostart {
+                    enabled: autostart_enabled,
+                },
             }
         }
     }
@@ -225,10 +285,22 @@ impl PrefsTarget {
     fn sync_steppers_and_fields(&self, sender: *mut NSObject) {
         // Build list of (stepper_ptr, field_ptr) pairs
         let pairs = [
-            (self.ivars().warn_stepper.get(), self.ivars().warn_field.get()),
-            (self.ivars().critical_stepper.get(), self.ivars().critical_field.get()),
-            (self.ivars().rearm_stepper.get(), self.ivars().rearm_field.get()),
-            (self.ivars().critical_period_stepper.get(), self.ivars().critical_period_field.get()),
+            (
+                self.ivars().warn_stepper.get(),
+                self.ivars().warn_field.get(),
+            ),
+            (
+                self.ivars().critical_stepper.get(),
+                self.ivars().critical_field.get(),
+            ),
+            (
+                self.ivars().rearm_stepper.get(),
+                self.ivars().rearm_field.get(),
+            ),
+            (
+                self.ivars().critical_period_stepper.get(),
+                self.ivars().critical_period_field.get(),
+            ),
         ];
 
         let sender_any = sender as *mut AnyObject;
@@ -252,9 +324,8 @@ impl PrefsTarget {
                         let clamped = v.clamp(min, max);
                         (*stepper_ptr).setDoubleValue(clamped);
                         if (v - clamped).abs() > 0.5 {
-                            (*field_ptr).setStringValue(
-                                &NSString::from_str(&(clamped as i64).to_string()),
-                            );
+                            (*field_ptr)
+                                .setStringValue(&NSString::from_str(&(clamped as i64).to_string()));
                         }
                     }
                 }
@@ -303,6 +374,12 @@ impl PrefsTarget {
 
     /// Populate all form controls from a `Config`.
     fn load_config(&self, cfg: &Config) {
+        // Capture original values for use at save time.
+        *self.ivars().original_warn_period.lock().unwrap() = cfg.cadence.warn_period;
+        self.ivars()
+            .original_autostart_enabled
+            .set(cfg.autostart.enabled);
+
         unsafe {
             // Device
             let popup = &*self.ivars().device_popup.get();
@@ -326,7 +403,11 @@ impl PrefsTarget {
             let t = &cfg.thresholds;
             macro_rules! set_check {
                 ($cell:expr, $val:expr) => {
-                    (*$cell.get()).setState(if $val { NSControlStateValueOn } else { NSControlStateValueOff });
+                    (*$cell.get()).setState(if $val {
+                        NSControlStateValueOn
+                    } else {
+                        NSControlStateValueOff
+                    });
                 };
             }
             set_check!(self.ivars().warn_enabled_check, t.warn_enabled);
@@ -338,11 +419,27 @@ impl PrefsTarget {
                     (*$fc.get()).setStringValue(&NSString::from_str(&($val as i64).to_string()));
                 };
             }
-            set_stepper_field!(self.ivars().warn_stepper, self.ivars().warn_field, t.warn as f64);
-            set_stepper_field!(self.ivars().critical_stepper, self.ivars().critical_field, t.critical as f64);
-            set_stepper_field!(self.ivars().rearm_stepper, self.ivars().rearm_field, t.rearm_hysteresis as f64);
+            set_stepper_field!(
+                self.ivars().warn_stepper,
+                self.ivars().warn_field,
+                t.warn as f64
+            );
+            set_stepper_field!(
+                self.ivars().critical_stepper,
+                self.ivars().critical_field,
+                t.critical as f64
+            );
+            set_stepper_field!(
+                self.ivars().rearm_stepper,
+                self.ivars().rearm_field,
+                t.rearm_hysteresis as f64
+            );
             let period_mins = (cfg.cadence.critical_period.as_secs() / 60) as f64;
-            set_stepper_field!(self.ivars().critical_period_stepper, self.ivars().critical_period_field, period_mins);
+            set_stepper_field!(
+                self.ivars().critical_period_stepper,
+                self.ivars().critical_period_field,
+                period_mins
+            );
 
             set_check!(self.ivars().menubar_check, cfg.menubar.enabled);
             set_check!(self.ivars().autostart_check, cfg.autostart.enabled);
@@ -394,7 +491,10 @@ fn make_int_field(
 ) -> Retained<NSTextField> {
     let frame = NSRect {
         origin: NSPoint { x: 0.0, y: 0.0 },
-        size: NSSize { width: 52.0, height: 22.0 },
+        size: NSSize {
+            width: 52.0,
+            height: 22.0,
+        },
     };
     let f = unsafe { NSTextField::initWithFrame(mtm.alloc::<NSTextField>(), frame) };
     unsafe {
@@ -424,7 +524,11 @@ fn make_checkbox(
         )
     };
     unsafe {
-        btn.setState(if on { NSControlStateValueOn } else { NSControlStateValueOff });
+        btn.setState(if on {
+            NSControlStateValueOn
+        } else {
+            NSControlStateValueOff
+        });
     }
     btn
 }
@@ -480,9 +584,14 @@ fn build_prefs_window(
     let popup = {
         let frame = NSRect {
             origin: NSPoint { x: 0.0, y: 0.0 },
-            size: NSSize { width: 180.0, height: 26.0 },
+            size: NSSize {
+                width: 180.0,
+                height: 26.0,
+            },
         };
-        unsafe { NSPopUpButton::initWithFrame_pullsDown(mtm.alloc::<NSPopUpButton>(), frame, false) }
+        unsafe {
+            NSPopUpButton::initWithFrame_pullsDown(mtm.alloc::<NSPopUpButton>(), frame, false)
+        }
     };
     unsafe {
         popup.addItemWithTitle(&NSString::from_str("Any MX"));
@@ -494,7 +603,10 @@ fn build_prefs_window(
 
     let id_frame = NSRect {
         origin: NSPoint { x: 0.0, y: 0.0 },
-        size: NSSize { width: 280.0, height: 22.0 },
+        size: NSSize {
+            width: 280.0,
+            height: 22.0,
+        },
     };
     let id_field = unsafe { NSTextField::initWithFrame(mtm.alloc::<NSTextField>(), id_frame) };
     unsafe {
@@ -517,10 +629,19 @@ fn build_prefs_window(
     );
     let warn_label = make_label("Warn threshold:", mtm);
     let warn_stepper = make_int_stepper(
-        1.0, 99.0, cfg.thresholds.warn as f64,
-        &target, sel!(onThresholdChanged:), mtm,
+        1.0,
+        99.0,
+        cfg.thresholds.warn as f64,
+        &target,
+        sel!(onThresholdChanged:),
+        mtm,
     );
-    let warn_field = make_int_field(cfg.thresholds.warn as f64, &target, sel!(onThresholdChanged:), mtm);
+    let warn_field = make_int_field(
+        cfg.thresholds.warn as f64,
+        &target,
+        sel!(onThresholdChanged:),
+        mtm,
+    );
     let warn_row = hstack(&[&*warn_label, &*warn_stepper, &*warn_field], 6.0, mtm);
 
     // --- Critical ---
@@ -533,34 +654,72 @@ fn build_prefs_window(
     );
     let crit_label = make_label("Critical threshold:", mtm);
     let crit_stepper = make_int_stepper(
-        1.0, 99.0, cfg.thresholds.critical as f64,
-        &target, sel!(onThresholdChanged:), mtm,
+        1.0,
+        99.0,
+        cfg.thresholds.critical as f64,
+        &target,
+        sel!(onThresholdChanged:),
+        mtm,
     );
-    let crit_field = make_int_field(cfg.thresholds.critical as f64, &target, sel!(onThresholdChanged:), mtm);
+    let crit_field = make_int_field(
+        cfg.thresholds.critical as f64,
+        &target,
+        sel!(onThresholdChanged:),
+        mtm,
+    );
     let crit_row = hstack(&[&*crit_label, &*crit_stepper, &*crit_field], 6.0, mtm);
 
     // --- Re-arm hysteresis ---
     let rearm_label = make_label("Re-arm hysteresis:", mtm);
     let rearm_stepper = make_int_stepper(
-        1.0, 20.0, cfg.thresholds.rearm_hysteresis as f64,
-        &target, sel!(onThresholdChanged:), mtm,
+        1.0,
+        20.0,
+        cfg.thresholds.rearm_hysteresis as f64,
+        &target,
+        sel!(onThresholdChanged:),
+        mtm,
     );
-    let rearm_field = make_int_field(cfg.thresholds.rearm_hysteresis as f64, &target, sel!(onThresholdChanged:), mtm);
+    let rearm_field = make_int_field(
+        cfg.thresholds.rearm_hysteresis as f64,
+        &target,
+        sel!(onThresholdChanged:),
+        mtm,
+    );
     let rearm_row = hstack(&[&*rearm_label, &*rearm_stepper, &*rearm_field], 6.0, mtm);
 
     // --- Critical re-notify period (minutes) ---
     let period_mins = (cfg.cadence.critical_period.as_secs() / 60) as f64;
     let period_label = make_label("Critical re-notify (min):", mtm);
     let period_stepper = make_int_stepper(
-        1.0, 240.0, period_mins,
-        &target, sel!(onThresholdChanged:), mtm,
+        1.0,
+        240.0,
+        period_mins,
+        &target,
+        sel!(onThresholdChanged:),
+        mtm,
     );
     let period_field = make_int_field(period_mins, &target, sel!(onThresholdChanged:), mtm);
-    let period_row = hstack(&[&*period_label, &*period_stepper, &*period_field], 6.0, mtm);
+    let period_row = hstack(
+        &[&*period_label, &*period_stepper, &*period_field],
+        6.0,
+        mtm,
+    );
 
     // --- Other flags ---
-    let menubar_check = make_checkbox("Show menu bar icon", cfg.menubar.enabled, &target, sel!(onThresholdChanged:), mtm);
-    let autostart_check = make_checkbox("Start at login", cfg.autostart.enabled, &target, sel!(onThresholdChanged:), mtm);
+    let menubar_check = make_checkbox(
+        "Show menu bar icon",
+        cfg.menubar.enabled,
+        &target,
+        sel!(onThresholdChanged:),
+        mtm,
+    );
+    let autostart_check = make_checkbox(
+        "Start at login",
+        cfg.autostart.enabled,
+        &target,
+        sel!(onThresholdChanged:),
+        mtm,
+    );
 
     // --- Bottom button row (Cancel | Save, right-aligned) ---
     let cancel_btn = unsafe {
@@ -585,7 +744,10 @@ fn build_prefs_window(
             mtm.alloc::<NSView>(),
             NSRect {
                 origin: NSPoint { x: 0.0, y: 0.0 },
-                size: NSSize { width: 1.0, height: 1.0 },
+                size: NSSize {
+                    width: 1.0,
+                    height: 1.0,
+                },
             },
         )
     };
@@ -594,26 +756,71 @@ fn build_prefs_window(
         // Re-configure as gravity-areas so the spacer pushes buttons right
         button_row.setDistribution(NSStackViewDistribution::GravityAreas);
         button_row.addView_inGravity(&spacer, NSStackViewGravity::Leading);
-        button_row.addView_inGravity(&*cancel_btn, NSStackViewGravity::Trailing);
-        button_row.addView_inGravity(&*save_btn, NSStackViewGravity::Trailing);
+        button_row.addView_inGravity(&cancel_btn, NSStackViewGravity::Trailing);
+        button_row.addView_inGravity(&save_btn, NSStackViewGravity::Trailing);
     }
 
     // --- Stow refs in ivars ---
-    target.ivars().device_popup.set(Retained::as_ptr(&popup) as *mut _);
-    target.ivars().identifier_field.set(Retained::as_ptr(&id_field) as *mut _);
-    target.ivars().warn_enabled_check.set(Retained::as_ptr(&warn_check) as *mut _);
-    target.ivars().critical_enabled_check.set(Retained::as_ptr(&crit_check) as *mut _);
-    target.ivars().warn_stepper.set(Retained::as_ptr(&warn_stepper) as *mut _);
-    target.ivars().warn_field.set(Retained::as_ptr(&warn_field) as *mut _);
-    target.ivars().critical_stepper.set(Retained::as_ptr(&crit_stepper) as *mut _);
-    target.ivars().critical_field.set(Retained::as_ptr(&crit_field) as *mut _);
-    target.ivars().rearm_stepper.set(Retained::as_ptr(&rearm_stepper) as *mut _);
-    target.ivars().rearm_field.set(Retained::as_ptr(&rearm_field) as *mut _);
-    target.ivars().critical_period_stepper.set(Retained::as_ptr(&period_stepper) as *mut _);
-    target.ivars().critical_period_field.set(Retained::as_ptr(&period_field) as *mut _);
-    target.ivars().menubar_check.set(Retained::as_ptr(&menubar_check) as *mut _);
-    target.ivars().autostart_check.set(Retained::as_ptr(&autostart_check) as *mut _);
-    target.ivars().save_button.set(Retained::as_ptr(&save_btn) as *mut _);
+    target
+        .ivars()
+        .device_popup
+        .set(Retained::as_ptr(&popup) as *mut _);
+    target
+        .ivars()
+        .identifier_field
+        .set(Retained::as_ptr(&id_field) as *mut _);
+    target
+        .ivars()
+        .warn_enabled_check
+        .set(Retained::as_ptr(&warn_check) as *mut _);
+    target
+        .ivars()
+        .critical_enabled_check
+        .set(Retained::as_ptr(&crit_check) as *mut _);
+    target
+        .ivars()
+        .warn_stepper
+        .set(Retained::as_ptr(&warn_stepper) as *mut _);
+    target
+        .ivars()
+        .warn_field
+        .set(Retained::as_ptr(&warn_field) as *mut _);
+    target
+        .ivars()
+        .critical_stepper
+        .set(Retained::as_ptr(&crit_stepper) as *mut _);
+    target
+        .ivars()
+        .critical_field
+        .set(Retained::as_ptr(&crit_field) as *mut _);
+    target
+        .ivars()
+        .rearm_stepper
+        .set(Retained::as_ptr(&rearm_stepper) as *mut _);
+    target
+        .ivars()
+        .rearm_field
+        .set(Retained::as_ptr(&rearm_field) as *mut _);
+    target
+        .ivars()
+        .critical_period_stepper
+        .set(Retained::as_ptr(&period_stepper) as *mut _);
+    target
+        .ivars()
+        .critical_period_field
+        .set(Retained::as_ptr(&period_field) as *mut _);
+    target
+        .ivars()
+        .menubar_check
+        .set(Retained::as_ptr(&menubar_check) as *mut _);
+    target
+        .ivars()
+        .autostart_check
+        .set(Retained::as_ptr(&autostart_check) as *mut _);
+    target
+        .ivars()
+        .save_button
+        .set(Retained::as_ptr(&save_btn) as *mut _);
 
     // Apply initial enabled/bound state (before loading config)
     target.update_stepper_bounds();
@@ -621,7 +828,12 @@ fn build_prefs_window(
     target.update_save_state();
 
     // --- Outer vertical stack ---
-    let insets = NSEdgeInsets { top: 16.0, left: 20.0, bottom: 16.0, right: 20.0 };
+    let insets = NSEdgeInsets {
+        top: 16.0,
+        left: 20.0,
+        bottom: 16.0,
+        right: 20.0,
+    };
     let content_stack = vstack_with_insets(
         &[
             &*device_row,
@@ -642,13 +854,15 @@ fn build_prefs_window(
     );
 
     // --- NSWindow ---
-    let style = NSWindowStyleMask::Titled
-        | NSWindowStyleMask::Closable
-        | NSWindowStyleMask::Miniaturizable;
+    let style =
+        NSWindowStyleMask::Titled | NSWindowStyleMask::Closable | NSWindowStyleMask::Miniaturizable;
 
     let content_rect = NSRect {
         origin: NSPoint { x: 0.0, y: 0.0 },
-        size: NSSize { width: 460.0, height: 480.0 },
+        size: NSSize {
+            width: 460.0,
+            height: 480.0,
+        },
     };
     let window = unsafe {
         NSWindow::initWithContentRect_styleMask_backing_defer(
@@ -666,7 +880,10 @@ fn build_prefs_window(
         window.center();
         window.setDelegate(Some(ProtocolObject::from_ref(&*target)));
     }
-    target.ivars().window.set(Retained::as_ptr(&window) as *mut _);
+    target
+        .ivars()
+        .window
+        .set(Retained::as_ptr(&window) as *mut _);
 
     // Re-load the passed config into the controls
     target.load_config(cfg);
@@ -719,7 +936,10 @@ impl PrefsWindow {
                 // Build fresh
                 let (window, target) = build_prefs_window(&cfg, mtm);
                 window.makeKeyAndOrderFront(None);
-                cell.set(Some(WindowCache { window, _target: target }));
+                cell.set(Some(WindowCache {
+                    window,
+                    _target: target,
+                }));
             }
         });
     }
@@ -745,7 +965,7 @@ pub fn run_oneshot() -> anyhow::Result<()> {
     loop {
         let is_open = CACHE.with(|cell| {
             let opt = cell.take();
-            let open = opt.as_ref().map_or(false, |c| c.window.isVisible());
+            let open = opt.as_ref().is_some_and(|c| c.window.isVisible());
             cell.set(opt);
             open
         });

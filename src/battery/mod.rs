@@ -32,7 +32,9 @@ pub fn handle_vendor_bytes(
     expected_swid_for_resolve: u8,
     feature_index_1000: &mut Option<u8>,
 ) -> VendorOutcome {
-    let Some(frame) = hidpp::decode(shape, bytes) else { return VendorOutcome::Ignored };
+    let Some(frame) = hidpp::decode(shape, bytes) else {
+        return VendorOutcome::Ignored;
+    };
     if frame.is_event() {
         if Some(frame.feature_index) == *feature_index_1000 {
             if let Some((_, _, raw)) = hidpp::decode_battery_status(&frame.params) {

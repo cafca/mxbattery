@@ -33,8 +33,10 @@ pub struct State {
 
 #[derive(Debug, thiserror::Error)]
 pub enum StateError {
-    #[error("io: {0}")] Io(#[from] std::io::Error),
-    #[error("json: {0}")] Json(#[from] serde_json::Error),
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("json: {0}")]
+    Json(#[from] serde_json::Error),
 }
 
 impl State {
@@ -48,7 +50,7 @@ impl State {
 
     pub fn save(&self, path: &Path) -> Result<(), StateError> {
         let body = serde_json::to_vec_pretty(self)?;
-        let dir = path.parent().unwrap();
+        let dir = path.parent().unwrap_or(std::path::Path::new("."));
         std::fs::create_dir_all(dir)?;
         let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
         std::io::Write::write_all(&mut tmp, &body)?;

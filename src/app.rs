@@ -12,15 +12,29 @@ use objc2_foundation::{MainThreadMarker, NSRunLoop, NSTimer};
 use crate::battery::{cb::CbBackend, BatteryBackend, BatteryEvent};
 use crate::config::ConfigWatcher;
 use crate::ipc::IpcServer;
-use crate::menubar::MenubarIcon;
+use crate::menubar::{MenubarCommand, MenubarIcon};
 use crate::notifier::{clear_armed_if_rose, decide, post, NotificationKind};
 use crate::paths::Paths;
 use crate::state::{BatteryReadingSnapshot, ChargingState, State};
 
 /// Messages from the tokio task to the main run loop.
 enum MainMsg {
-    Render { percent: u8, charging: ChargingState },
+    Render {
+        percent: u8,
+        charging: ChargingState,
+    },
     OpenPrefs,
+    SetMuted(bool),
+    Quit,
+}
+
+fn next_local_midnight(now: chrono::DateTime<chrono::Local>) -> chrono::DateTime<chrono::Local> {
+    let next_day = (now + chrono::Duration::days(1)).date_naive();
+    next_day
+        .and_hms_opt(0, 0, 0)
+        .unwrap()
+        .and_local_timezone(chrono::Local)
+        .unwrap()
 }
 
 pub fn run_daemon() -> anyhow::Result<()> {
@@ -52,6 +66,10 @@ pub fn run_daemon() -> anyhow::Result<()> {
     // Set up a channel for the tokio task to send messages to the main thread.
     let (main_tx, main_rx) = tokio::sync::mpsc::unbounded_channel::<MainMsg>();
 
+    // Wire the menubar click items to send commands back into the tokio task.
+    let (menubar_tx, mut menubar_rx) = tokio::sync::mpsc::unbounded_channel::<MenubarCommand>();
+    menubar.set_command_channel(menubar_tx);
+
     // Set up the NSApplication and policy.
     let app = objc2_app_kit::NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(objc2_app_kit::NSApplicationActivationPolicy::Accessory);
@@ -61,15 +79,19 @@ pub fn run_daemon() -> anyhow::Result<()> {
     let paths_for_task = paths.clone();
     let main_tx_bat = main_tx.clone();
     let main_tx_ipc = main_tx.clone();
+    let main_tx_menu = main_tx.clone();
     rt.spawn(async move {
         let mut last_percent: u8 = 0;
         let mut last_charging = ChargingState::Unknown;
+        let mut device_name = String::from("Logitech mouse");
         loop {
             tokio::select! {
                 ev = bat_rx.recv() => {
                     let Ok(ev) = ev else { continue };
                     match ev {
-                        BatteryEvent::Connected { .. } => {}
+                        BatteryEvent::Connected { name } => {
+                            device_name = name;
+                        }
                         BatteryEvent::Disconnected => {}
                         BatteryEvent::Percent(p) => {
                             last_percent = p;
@@ -79,6 +101,7 @@ pub fn run_daemon() -> anyhow::Result<()> {
                                 &mut state,
                                 last_percent,
                                 last_charging,
+                                &device_name,
                             );
                             let _ = main_tx_bat.send(MainMsg::Render {
                                 percent: last_percent,
@@ -93,6 +116,7 @@ pub fn run_daemon() -> anyhow::Result<()> {
                                 &mut state,
                                 last_percent,
                                 last_charging,
+                                &device_name,
                             );
                             let _ = main_tx_bat.send(MainMsg::Render {
                                 percent: last_percent,
@@ -104,6 +128,27 @@ pub fn run_daemon() -> anyhow::Result<()> {
                 cmd = ipc_rx.recv() => {
                     let Ok(_cmd) = cmd else { continue };
                     let _ = main_tx_ipc.send(MainMsg::OpenPrefs);
+                }
+                cmd = menubar_rx.recv() => {
+                    let Some(cmd) = cmd else { continue };
+                    match cmd {
+                        MenubarCommand::OpenPrefs => {
+                            let _ = main_tx_menu.send(MainMsg::OpenPrefs);
+                        }
+                        MenubarCommand::ToggleMuteToday => {
+                            let now = chrono::Local::now();
+                            state.mute_until = match state.mute_until {
+                                Some(t) if t > now => None,
+                                _ => Some(next_local_midnight(now)),
+                            };
+                            let _ = state.save(&paths_for_task.state_file());
+                            let muted = state.mute_until.is_some_and(|t| t > now);
+                            let _ = main_tx_menu.send(MainMsg::SetMuted(muted));
+                        }
+                        MenubarCommand::Quit => {
+                            let _ = main_tx_menu.send(MainMsg::Quit);
+                        }
+                    }
                 }
             }
         }
@@ -140,22 +185,26 @@ pub fn run_daemon() -> anyhow::Result<()> {
                     MainMsg::OpenPrefs => {
                         crate::prefs_ui::PrefsWindow::show_or_focus(mtm_inner);
                     }
+                    MainMsg::SetMuted(muted) => {
+                        // SAFETY: menubar_ptr is valid (see above).
+                        unsafe { (*menubar_ptr).set_muted(muted) };
+                    }
+                    MainMsg::Quit => {
+                        let app = objc2_app_kit::NSApplication::sharedApplication(mtm_inner);
+                        unsafe { app.terminate(None) };
+                    }
                 }
             }
         })
     };
 
-    let timer = unsafe {
-        NSTimer::scheduledTimerWithTimeInterval_repeats_block(0.1, true, &timer_block)
-    };
+    let timer =
+        unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(0.1, true, &timer_block) };
     // Add the timer to the common run loop modes so it keeps firing even when
     // the user is interacting with menus.
     let run_loop = unsafe { NSRunLoop::mainRunLoop() };
     unsafe {
-        run_loop.addTimer_forMode(
-            &timer,
-            objc2_foundation::NSRunLoopCommonModes,
-        );
+        run_loop.addTimer_forMode(&timer, objc2_foundation::NSRunLoopCommonModes);
     }
 
     unsafe { app.run() };
@@ -173,13 +222,14 @@ fn handle_reading(
     state: &mut State,
     percent: u8,
     charging: ChargingState,
+    device_name: &str,
 ) {
     let cfg = cfg_handle.load_full();
     let snap = BatteryReadingSnapshot { percent, charging };
     clear_armed_if_rose(&snap, state, &cfg);
     state.last_seen = Some(snap);
     if let Some(kind) = decide(&snap, state, &cfg, chrono::Local::now()) {
-        post(kind, percent, "MX Master 3 Mac");
+        post(kind, percent, device_name);
         match kind {
             NotificationKind::Warn => {
                 state.last_warn_notified_date = Some(chrono::Local::now().date_naive());

@@ -2,14 +2,17 @@ mod decide;
 #[cfg(target_os = "macos")]
 mod un;
 
-pub use decide::{decide, clear_armed_if_rose, NotificationKind};
+pub use decide::{clear_armed_if_rose, decide, NotificationKind};
 
 #[cfg(target_os = "macos")]
 pub fn post(kind: NotificationKind, percent: u8, device_name: &str) {
     let (title, body, id) = match kind {
         NotificationKind::Warn => (
             "Mouse battery low".to_string(),
-            format!("{} is at {}%. Consider charging soon.", device_name, percent),
+            format!(
+                "{} is at {}%. Consider charging soon.",
+                device_name, percent
+            ),
             format!("mxbattery.warn.{}", chrono::Local::now().date_naive()),
         ),
         NotificationKind::Critical => (

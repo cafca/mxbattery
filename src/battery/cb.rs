@@ -89,8 +89,14 @@ fn next_swid(counter: &mut u8) -> u8 {
 /// # Safety
 /// `char_ptr` must be a valid `CBCharacteristic` pointer valid for the
 /// current main-queue callback.  Only call from the main dispatch queue.
-unsafe fn write_vendor(peripheral: &CBPeripheral, char_ptr: *mut CBCharacteristic, payload: Vec<u8>) {
-    if char_ptr.is_null() { return; }
+unsafe fn write_vendor(
+    peripheral: &CBPeripheral,
+    char_ptr: *mut CBCharacteristic,
+    payload: Vec<u8>,
+) {
+    if char_ptr.is_null() {
+        return;
+    }
     let c = &*char_ptr;
     let data = NSData::with_bytes(&payload);
     peripheral.writeValue_forCharacteristic_type(
@@ -225,7 +231,11 @@ struct Inner {
 impl Inner {
     fn new(filter: DeviceFilter) -> Self {
         let (tx, _) = broadcast::channel(64);
-        Self { tx, filter, peripherals: HashMap::new() }
+        Self {
+            tx,
+            filter,
+            peripherals: HashMap::new(),
+        }
     }
 
     fn send(&self, ev: BatteryEvent) {
@@ -505,7 +515,7 @@ declare_class!(
                 // sent Connected.  A stale OS subscription can deliver a 2A19
                 // notification even for a peripheral we rejected, so guard here.
                 let inner = self.ivars().lock().unwrap();
-                if inner.peripherals.get(&pid).map_or(false, |st| st.connected_emitted) {
+                if inner.peripherals.get(&pid).is_some_and(|st| st.connected_emitted) {
                     inner.send(BatteryEvent::Percent(percent));
                 }
                 return;
@@ -560,7 +570,7 @@ declare_class!(
                     }
                     VendorOutcome::Charging(s) => {
                         let inner = self.ivars().lock().unwrap();
-                        if inner.peripherals.get(&pid).map_or(false, |st| st.connected_emitted) {
+                        if inner.peripherals.get(&pid).is_some_and(|st| st.connected_emitted) {
                             inner.send(BatteryEvent::Charging(s));
                         }
                     }
@@ -837,10 +847,14 @@ impl CbBackend {
         };
 
         // Leak the Retained values into raw pointers; Drop impl will release them.
-        let mgr_ptr = Retained::into_raw(manager) as *mut CBCentralManager;
-        let del_ptr = Retained::into_raw(delegate) as *mut Delegate;
+        let mgr_ptr = Retained::into_raw(manager);
+        let del_ptr = Retained::into_raw(delegate);
 
-        CbBackend { inner, _manager: mgr_ptr, _delegate: del_ptr }
+        CbBackend {
+            inner,
+            _manager: mgr_ptr,
+            _delegate: del_ptr,
+        }
     }
 }
 

@@ -4,11 +4,14 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::broadcast;
 
 #[derive(Clone, Copy, Debug)]
-pub enum IpcCommand { OpenPrefs }
+pub enum IpcCommand {
+    OpenPrefs,
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum IpcError {
-    #[error("io: {0}")] Io(#[from] std::io::Error),
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
     #[error("daemon already running on this socket")]
     AlreadyRunning,
 }
@@ -33,16 +36,19 @@ impl IpcServer {
             loop {
                 let (stream, _) = match listener.accept().await {
                     Ok(s) => s,
-                    Err(e) => { tracing::warn!(?e, "accept"); continue; }
+                    Err(e) => {
+                        tracing::warn!(?e, "accept");
+                        continue;
+                    }
                 };
                 let tx = tx2.clone();
                 tokio::spawn(async move {
                     use tokio::io::AsyncReadExt;
                     let mut buf = String::new();
-                    if stream.take(4096).read_to_string(&mut buf).await.is_ok() {
-                        if buf.trim() == "open_prefs" {
-                            let _ = tx.send(IpcCommand::OpenPrefs);
-                        }
+                    if stream.take(4096).read_to_string(&mut buf).await.is_ok()
+                        && buf.trim() == "open_prefs"
+                    {
+                        let _ = tx.send(IpcCommand::OpenPrefs);
                     }
                 });
             }
@@ -50,7 +56,9 @@ impl IpcServer {
         Ok(Self { tx, _path: path })
     }
 
-    pub fn subscribe(&self) -> broadcast::Receiver<IpcCommand> { self.tx.subscribe() }
+    pub fn subscribe(&self) -> broadcast::Receiver<IpcCommand> {
+        self.tx.subscribe()
+    }
 }
 
 pub async fn send_open_prefs(path: &Path) -> Result<(), IpcError> {

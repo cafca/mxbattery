@@ -48,7 +48,9 @@ pub struct Autostart {
     pub enabled: bool,
 }
 
-fn yes() -> bool { true }
+fn yes() -> bool {
+    true
+}
 
 impl Default for Config {
     fn default() -> Self {
@@ -108,7 +110,7 @@ impl Config {
     pub fn save(&self, path: &std::path::Path) -> Result<(), ConfigError> {
         self.validate()?;
         let body = toml::to_string_pretty(self).expect("serialise");
-        let dir = path.parent().unwrap();
+        let dir = path.parent().unwrap_or(std::path::Path::new("."));
         std::fs::create_dir_all(dir)?;
         let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
         std::io::Write::write_all(&mut tmp, body.as_bytes())?;
@@ -134,13 +136,21 @@ impl ConfigWatcher {
         let current = Arc::new(ArcSwap::from_pointee(initial));
         let cur = current.clone();
         let watch_path = std::fs::canonicalize(&path).unwrap_or(path.clone());
-        let dir = path.parent().unwrap().to_path_buf();
+        let dir = path
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .to_path_buf();
         let mut watcher = notify::recommended_watcher(move |res: notify::Result<Event>| {
             let Ok(event) = res else { return };
-            if !matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)) {
+            if !matches!(
+                event.kind,
+                EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
+            ) {
                 return;
             }
-            if !event.paths.iter().any(|p| p == &watch_path) { return; }
+            if !event.paths.iter().any(|p| p == &watch_path) {
+                return;
+            }
             match Config::load(&watch_path) {
                 Ok(c) => {
                     tracing::info!("config reloaded");
@@ -150,14 +160,24 @@ impl ConfigWatcher {
             }
         })?;
         watcher.watch(&dir, RecursiveMode::NonRecursive)?;
-        Ok(Self { current, _watcher: watcher, _path: path })
+        Ok(Self {
+            current,
+            _watcher: watcher,
+            _path: path,
+        })
     }
 
-    pub fn current(&self) -> Arc<Config> { self.current.load_full() }
+    pub fn current(&self) -> Arc<Config> {
+        self.current.load_full()
+    }
 
-    pub fn handle(&self) -> Arc<ArcSwap<Config>> { self.current.clone() }
+    pub fn handle(&self) -> Arc<ArcSwap<Config>> {
+        self.current.clone()
+    }
 }
 
 impl From<notify::Error> for ConfigError {
-    fn from(e: notify::Error) -> Self { ConfigError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)) }
+    fn from(e: notify::Error) -> Self {
+        ConfigError::Io(std::io::Error::other(e))
+    }
 }

@@ -15,9 +15,7 @@ use objc2_app_kit::{
     NSBezierPath, NSColor, NSImage, NSMenu, NSMenuItem, NSStatusBar, NSStatusItem,
     NSVariableStatusItemLength,
 };
-use objc2_foundation::{
-    CGFloat, MainThreadMarker, NSObject, NSPoint, NSRect, NSSize, NSString,
-};
+use objc2_foundation::{CGFloat, MainThreadMarker, NSObject, NSPoint, NSRect, NSSize, NSString};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::state::ChargingState;
@@ -160,8 +158,7 @@ fn build_menu(
     target: &MenuTarget,
     mtm: MainThreadMarker,
 ) -> (Retained<NSMenu>, Retained<NSMenuItem>) {
-    let menu =
-        unsafe { NSMenu::initWithTitle(mtm.alloc::<NSMenu>(), &NSString::from_str("")) };
+    let menu = unsafe { NSMenu::initWithTitle(mtm.alloc::<NSMenu>(), &NSString::from_str("")) };
 
     let mute_item = make_item("Mute today", sel!(handleMuteToday:), target, mtm);
     let prefs_item = make_item("Preferences\u{2026}", sel!(handlePrefs:), target, mtm);
@@ -222,9 +219,8 @@ fn draw_battery(percent: u8, charging: ChargingState) {
             height: ICON_H - 4.0,
         },
     );
-    let body = unsafe {
-        NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(body_rect, 2.0, 2.0)
-    };
+    let body =
+        unsafe { NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(body_rect, 2.0, 2.0) };
     unsafe {
         body.setLineWidth(1.0);
         NSColor::controlTextColor().setStroke();
