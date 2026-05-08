@@ -1,4 +1,4 @@
-use mxbattery::config::{Config, DeviceFilter, ConfigError};
+use mxbattery::config::{Config, ConfigError, DeviceFilter};
 
 const VALID: &str = r#"
 schema_version = 1
@@ -31,8 +31,14 @@ fn parses_a_valid_config() {
     assert!(matches!(cfg.device, DeviceFilter::Specific { .. }));
     assert_eq!(cfg.thresholds.warn, 20);
     assert_eq!(cfg.thresholds.critical, 5);
-    assert_eq!(cfg.cadence.critical_period, std::time::Duration::from_secs(30 * 60));
-    assert_eq!(cfg.cadence.warn_period,    std::time::Duration::from_secs(24 * 60 * 60));
+    assert_eq!(
+        cfg.cadence.critical_period,
+        std::time::Duration::from_secs(30 * 60)
+    );
+    assert_eq!(
+        cfg.cadence.warn_period,
+        std::time::Duration::from_secs(24 * 60 * 60)
+    );
     assert!(cfg.thresholds.warn_enabled);
     assert!(cfg.thresholds.critical_enabled);
 }

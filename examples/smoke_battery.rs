@@ -12,5 +12,7 @@ fn main() {
             println!("{:?}", ev);
         }
     });
-    unsafe { app.run(); }
+    unsafe {
+        app.run();
+    }
 }

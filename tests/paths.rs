@@ -6,7 +6,10 @@ fn paths_under_app_support() {
     let p = Paths::with_root(PathBuf::from("/tmp/mxb-test"));
     assert_eq!(p.config_file(), PathBuf::from("/tmp/mxb-test/config.toml"));
     assert_eq!(p.state_file(), PathBuf::from("/tmp/mxb-test/state.json"));
-    assert_eq!(p.control_socket(), PathBuf::from("/tmp/mxb-test/control.sock"));
+    assert_eq!(
+        p.control_socket(),
+        PathBuf::from("/tmp/mxb-test/control.sock")
+    );
     assert_eq!(p.app_support_dir(), PathBuf::from("/tmp/mxb-test"));
 }
 
