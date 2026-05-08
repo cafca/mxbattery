@@ -84,7 +84,18 @@ When filing a bug, please include:
 
 - Your macOS version and Mac model.
 - Device name and firmware version (`mxbattery read` plus the macOS Bluetooth menu).
-- A snippet of `~/Library/Application Support/MXBattery/daemon.log` and `daemon.err.log` covering the issue, ideally with `MXBATTERY_LOG=debug`.
+- Daemon logs covering the issue, with `MXBATTERY_LOG=debug` set.
+
+How to capture logs depends on how the daemon is running:
+
+- **Installed via `mxbattery install` (launchd):** the agent writes to `~/Library/Application\ Support/MXBattery/daemon.log` and `daemon.err.log`. Set `EnvironmentVariables` → `MXBATTERY_LOG=debug` in `~/Library/LaunchAgents/com.vincentahrend.mxbattery-app.plist` and reload with `launchctl kickstart -k gui/$UID/com.vincentahrend.mxbattery-app`. Then tail `daemon.err.log`.
+- **Running directly (terminal or `open`):** there is no log file by default — logs go to stderr. Capture with:
+
+  ```bash
+  killall mxbattery 2>/dev/null
+  MXBATTERY_LOG=debug open --stderr /tmp/mxb.err target/release/MXBattery.app
+  tail -F /tmp/mxb.err
+  ```
 
 The full design and implementation plan live under [`docs/superpowers/`](docs/superpowers/) for anyone who wants to understand the codebase before contributing.
 
