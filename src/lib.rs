@@ -4,6 +4,7 @@ pub mod battery;
 pub mod config;
 pub mod device_filter;
 pub mod hidpp;
+pub mod ipc;
 pub mod logging;
 #[cfg(target_os = "macos")]
 pub mod menubar;
