@@ -1,4 +1,4 @@
-//! CoreBluetooth backend — BAS percent path (Task 11).
+//! CoreBluetooth backend — BAS + HID++ charging state (Tasks 11–12).
 //!
 //! Sequence:
 //! 1. `centralManagerDidUpdateState` (poweredOn) → retrieve already-connected
@@ -9,9 +9,11 @@
 //!    reported chars, read 0x2A24 + 0x2A50 to seed the DeviceProbe.
 //! 5. `didUpdateValueForCharacteristic`:
 //!    - 2A24 / 2A50 → fill probe; when both set, run filter.  If pass: emit
-//!      Connected, setNotify for 2A19 + vendor, read 2A19 for initial value.
+//!      Connected, setNotify for 2A19 + vendor, read 2A19 for initial value,
+//!      and send HID++ GetFeature(0x1000) to resolve the battery-status idx.
 //!    - 2A19 → emit Percent.
-//!    - vendor → debug-log, drop.
+//!    - vendor → dispatch via `handle_vendor_bytes`; on feature-resolve,
+//!      send GetBatteryLevelStatus; on charging event, emit Charging.
 //! 6. `didDisconnectPeripheral` → emit Disconnected, keep manager alive.
 //!
 //! CoreBluetooth fires callbacks on the main dispatch queue (queue = nil).
@@ -29,13 +31,13 @@ use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2::{declare_class, msg_send_id, mutability, ClassType, DeclaredClass};
 use objc2_core_bluetooth::{
-    CBCentralManager, CBCentralManagerDelegate, CBCharacteristic, CBManagerState, CBPeripheral,
-    CBPeripheralDelegate, CBService, CBUUID,
+    CBCentralManager, CBCentralManagerDelegate, CBCharacteristic, CBCharacteristicWriteType,
+    CBManagerState, CBPeripheral, CBPeripheralDelegate, CBService, CBUUID,
 };
-use objc2_foundation::{MainThreadMarker, NSArray, NSObject, NSObjectProtocol, NSString};
+use objc2_foundation::{MainThreadMarker, NSArray, NSData, NSObject, NSObjectProtocol, NSString};
 use tokio::sync::broadcast;
 
-use crate::battery::BatteryEvent;
+use crate::battery::{BatteryEvent, VendorOutcome};
 use crate::config::DeviceFilter;
 use crate::device_filter::{matches, DeviceProbe};
 use crate::hidpp::FrameShape;
@@ -73,16 +75,42 @@ fn uuid_matches(uuid: &CBUUID, candidate: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// Helper functions
+// ---------------------------------------------------------------------------
+
+/// Advance the swid counter, wrapping around 1..=15 (skipping 0).
+fn next_swid(counter: &mut u8) -> u8 {
+    let swid = *counter;
+    *counter = if swid >= 15 { 1 } else { swid + 1 };
+    swid
+}
+
+/// Write a payload to the vendor characteristic with WriteWithResponse.
+/// # Safety
+/// `char_ptr` must be a valid `CBCharacteristic` pointer valid for the
+/// current main-queue callback.  Only call from the main dispatch queue.
+unsafe fn write_vendor(peripheral: &CBPeripheral, char_ptr: *mut CBCharacteristic, payload: Vec<u8>) {
+    if char_ptr.is_null() { return; }
+    let c = &*char_ptr;
+    let data = NSData::with_bytes(&payload);
+    peripheral.writeValue_forCharacteristic_type(
+        &data,
+        c,
+        CBCharacteristicWriteType::CBCharacteristicWriteWithResponse,
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Per-peripheral state
 // ---------------------------------------------------------------------------
 
 /// All mutable state for a single connected peripheral.
 /// Stored behind `Mutex` inside the ivar so `Delegate` can be `Send+Sync`.
-#[allow(dead_code)] // Task-12 scaffolding fields intentionally unused yet
 struct PeriphState {
     /// Stable string identifier (NSUUID → string) used as HashMap key and
     /// sent in log messages.  Does NOT hold the Objective-C NSUUID object so
     /// the struct is `Send`.
+    #[allow(dead_code)]
     id: String,
     /// Peripheral name for the Connected event.
     name: String,
@@ -105,7 +133,7 @@ struct PeriphState {
     char_vendor: Option<*mut CBCharacteristic>,
     /// Device filter probe being built up.
     probe: DeviceProbe,
-    // --- Task-12 scaffolding (unused this task) ---
+    // --- HID++ state ---
     shape: FrameShape,
     feature_index_1000: Option<u8>,
     swid_counter: u8,
@@ -447,11 +475,60 @@ declare_class!(
             }
 
             if uuid_matches(&cuuid, UUID_VENDOR_CHAR) {
-                // Task-12 will process vendor char updates; for now just log.
+                let payload = match characteristic.value() {
+                    Some(d) if !d.is_empty() => d.bytes().to_vec(),
+                    _ => return,
+                };
                 tracing::debug!(
-                    "vendor char update for {} (Task-12 pending)",
-                    pid
+                    "vendor char update for {}: {:02x?}",
+                    pid, &payload
                 );
+
+                let outcome = {
+                    let mut inner = self.ivars().lock().unwrap();
+                    let st = match inner.peripherals.get_mut(&pid) {
+                        Some(s) => s,
+                        None => return,
+                    };
+                    let expected = st.pending_resolve_swid.unwrap_or(0);
+                    crate::battery::handle_vendor_bytes(
+                        st.shape,
+                        &payload,
+                        expected,
+                        &mut st.feature_index_1000,
+                    )
+                };
+
+                match outcome {
+                    VendorOutcome::ResolvedBatteryStatusFeature(idx) => {
+                        tracing::debug!(
+                            "resolved battery-status feature index 0x{:02x} for {}",
+                            idx, pid
+                        );
+                        // Clear the pending resolve and seed initial charging state.
+                        let (shape, vendor_ptr) = {
+                            let mut inner = self.ivars().lock().unwrap();
+                            let st = match inner.peripherals.get_mut(&pid) {
+                                Some(s) => s,
+                                None => return,
+                            };
+                            st.pending_resolve_swid = None;
+                            let swid = next_swid(&mut st.swid_counter);
+                            let frame = crate::hidpp::encode_get_battery_level_status(
+                                st.shape, idx, swid,
+                            );
+                            (frame, st.char_vendor.unwrap_or(std::ptr::null_mut()))
+                        };
+                        write_vendor(peripheral, vendor_ptr, shape);
+                    }
+                    VendorOutcome::Charging(s) => {
+                        let inner = self.ivars().lock().unwrap();
+                        if inner.peripherals.get(&pid).map_or(false, |st| st.connected_emitted) {
+                            inner.send(BatteryEvent::Charging(s));
+                        }
+                    }
+                    VendorOutcome::Ignored => {}
+                }
                 return;
             }
 
@@ -551,6 +628,29 @@ declare_class!(
                 if let Some(ptr) = vendor_ptr {
                     let c = &*ptr;
                     peripheral.setNotifyValue_forCharacteristic(true, c);
+
+                    // Issue a GetFeature(0x1000) request to resolve the
+                    // battery-status feature index for this peripheral.
+                    let (swid, frame) = {
+                        let mut inner = self.ivars().lock().unwrap();
+                        if let Some(st) = inner.peripherals.get_mut(&pid) {
+                            let swid = next_swid(&mut st.swid_counter);
+                            st.pending_resolve_swid = Some(swid);
+                            let frame = crate::hidpp::encode_get_feature(
+                                st.shape,
+                                crate::hidpp::FEATURE_BATTERY_STATUS,
+                                swid,
+                            );
+                            (swid, frame)
+                        } else {
+                            return;
+                        }
+                    };
+                    tracing::debug!(
+                        "sending GetFeature(0x1000) swid={} to {}",
+                        swid, pid
+                    );
+                    write_vendor(peripheral, ptr, frame);
                 }
                 return;
             }
