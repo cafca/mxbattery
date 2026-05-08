@@ -1,5 +1,6 @@
 //! MXBattery — Logitech BLE mouse battery monitor for macOS.
 
+pub mod battery;
 pub mod config;
 pub mod device_filter;
 pub mod hidpp;
