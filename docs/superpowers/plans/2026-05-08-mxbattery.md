@@ -1658,9 +1658,9 @@ Expected: warnings about the unimplemented `Delegate::new` are fine; the binary 
 
 There are no shortcuts. Use `cargo check` after each method addition. The delegate's `Inner` lives behind `Arc<Mutex<Inner>>`; CoreBluetooth's main-queue serialisation means contention is minimal.
 
-- [ ] **Step 5: Add a manual smoke test**
+- [ ] **Step 5: Add a runnable example for the dogfood checklist**
 
-Add `examples/smoke_battery.rs`:
+Add `examples/smoke_battery.rs` (referenced from `docs/dogfood-checklist.md`):
 
 ```rust
 use mxbattery::battery::{cb::CbBackend, BatteryBackend, BatteryEvent};
@@ -1671,7 +1671,6 @@ fn main() {
     let mtm = MainThreadMarker::new().expect("main thread");
     let backend = CbBackend::start(DeviceFilter::AnyMx, mtm);
     let mut rx = backend.subscribe();
-    // We need the AppKit run loop to drive CoreBluetooth callbacks.
     let app = unsafe { objc2_app_kit::NSApplication::sharedApplication(mtm) };
     std::thread::spawn(move || loop {
         if let Ok(ev) = rx.blocking_recv() {
@@ -1682,20 +1681,10 @@ fn main() {
 }
 ```
 
-- [ ] **Step 6: Smoke-run**
+- [ ] **Step 6: Verify it builds**
 
-Build the example bundled in a minimal .app:
-
-```bash
-mkdir -p target/SmokeBattery.app/Contents/MacOS
-cp tools/Info.plist.template target/SmokeBattery.app/Contents/Info.plist  # (Task 21 creates this)
-cargo build --example smoke_battery --release
-cp target/release/examples/smoke_battery target/SmokeBattery.app/Contents/MacOS/smoke_battery
-codesign --force --sign - target/SmokeBattery.app
-open target/SmokeBattery.app
-```
-
-Expected: TCC prompt for Bluetooth on first run; after granting, the terminal that launched it shows `Connected { name: "MX Master 3 Mac" }` and a `Percent(NN)` line within ~2s. The first run depends on Task 21 being complete; if that hasn't been done yet, defer this step until after Task 21.
+Run: `cargo build --release --example smoke_battery`
+Expected: PASS.
 
 - [ ] **Step 7: Commit**
 
@@ -1827,9 +1816,10 @@ Implementation detail: when sending the feature-resolve request immediately afte
 Run: `cargo test --test hidpp_event`
 Expected: PASS (4 tests).
 
-- [ ] **Step 5: Re-run the smoke example**
+- [ ] **Step 5: Verify it builds**
 
-Run: `open target/SmokeBattery.app`. Expected: a `Charging(...)` event appears within ~2 s of launch, and another after physically plugging or unplugging the device.
+Run: `cargo build --release`
+Expected: PASS.
 
 - [ ] **Step 6: Commit**
 
@@ -1853,9 +1843,10 @@ In the `peripheral:didWriteValueForCharacteristic:` arm, if `error.code == 13`, 
 
 In the same place, schedule a `dispatch_after` for 2 s after each send; if the matching response has not arrived (`Inner` keeps a `pending_resolve_swid: Option<u8>` that gets cleared on receive), advance the variant and retry.
 
-- [ ] **Step 2: Manual verification**
+- [ ] **Step 2: Verify it builds**
 
-Force a wrong shape locally: edit `Inner::default()` to start at `WithDevIdx19`. Re-run the smoke. Expect the log to show two retries before settling on `NoDevIdx18`, then normal operation. Revert the test edit before committing.
+Run: `cargo build --release`
+Expected: PASS.
 
 - [ ] **Step 3: Commit**
 
@@ -1863,6 +1854,8 @@ Force a wrong shape locally: edit `Inner::default()` to start at `WithDevIdx19`.
 git add src/battery/cb.rs
 git commit -m "feat(battery): auto-probe HID++ frame shape on connect"
 ```
+
+> Manual verification of the variant fallback (force a wrong shape and observe retries) is described in `docs/dogfood-checklist.md`.
 
 ---
 
@@ -2127,9 +2120,10 @@ pub enum MenubarCommand {
 
 When `state.mute_until` is `Some(t)` and `t > now`, the item's title should be "Unmute". Otherwise "Mute today". Provide a public `MenubarIcon::set_muted(&self, muted: bool)` method that updates the title.
 
-- [ ] **Step 3: Smoke verification**
+- [ ] **Step 3: Verify it builds**
 
-Run the same smoke example with the menu installed; click each item and verify the channel receives `MenubarCommand`. (The actual handlers wire up in Task 16 — for now, just `tracing::info!` each.)
+Run: `cargo build --release`
+Expected: PASS.
 
 - [ ] **Step 4: Commit**
 
@@ -2191,13 +2185,10 @@ When `warn_enabled` is false, dim the warn-threshold stepper (`isEnabled = false
 
 In Task 19's app delegate (next phase), wire double-clicks of the .app to `prefs_ui::show_or_focus()`.
 
-- [ ] **Step 5: Manual smoke**
+- [ ] **Step 5: Verify it builds**
 
-```bash
-cargo run -- prefs
-```
-
-Expected: window opens; cancelling discards changes; saving writes a valid TOML to `~/Library/Application Support/MXBattery/config.toml`.
+Run: `cargo build --release`
+Expected: PASS.
 
 - [ ] **Step 6: Commit**
 
@@ -2846,14 +2837,10 @@ pub fn run() -> anyhow::Result<()> {
 }
 ```
 
-- [ ] **Step 3: Verify it builds + runs from a bundle**
+- [ ] **Step 3: Verify it builds**
 
-```bash
-./tools/make-app.sh
-open -W target/release/MXBattery.app
-```
-
-Expected: TCC Bluetooth prompt; menubar icon appears within ~3 s; clicking it shows the menu; double-clicking the .app while running brings up prefs.
+Run: `./tools/make-app.sh`
+Expected: produces `target/release/MXBattery.app` with the binary inside.
 
 - [ ] **Step 4: Commit**
 
@@ -2862,9 +2849,13 @@ git add src/app.rs src/lib.rs
 git commit -m "feat(app): NSApplication wiring + glue loop"
 ```
 
+> End-to-end runtime verification (TCC prompts, menu bar appearance, click handlers, threshold notifications, plug/unplug, mute, prefs hot-reload, launchd install/uninstall, login restart) is documented in `docs/dogfood-checklist.md` and performed by the maintainer outside the implementation flow.
+
 ---
 
-### Task 23: End-to-end dogfood checklist
+### Task 23: Dogfood checklist (documentation only)
+
+This task only writes the checklist document. Actual hardware-dependent verification (TCC prompts, plug/unplug latency, login restart, etc.) is performed by the maintainer outside the implementation flow.
 
 **Files:**
 - Create: `docs/dogfood-checklist.md`
@@ -2876,40 +2867,112 @@ Create `docs/dogfood-checklist.md`:
 ```markdown
 # MXBattery dogfood checklist
 
-Each box must be checked manually on the user's machine before tagging v0.1.0.
+This document describes how to manually verify the app end-to-end on real hardware.
+Implementation tasks do not gate on these checks; they are run separately by the
+maintainer once the implementation is complete.
 
-- [ ] First-run TCC: Bluetooth prompt appears on `open MXBattery.app`. Allow it.
-- [ ] First-run TCC: Notifications prompt appears on first decided-fire. Allow it.
-- [ ] Battery percent: menu bar icon updates within ~2 s of plugging or unplugging.
-- [ ] Charging icon: bolt overlay appears within ~1 s of plug-in, disappears within ~1 s of unplug.
-- [ ] Warn: drop battery below 20 % while discharging — exactly one notification fires within 5 s. A second drop on the same day stays silent.
-- [ ] Critical: drop below 5 % — first critical notification fires immediately; a second fires 30 min later if still below.
-- [ ] Mute today: clicking "Mute today" replaces the menu item title with "Unmute" and silences the rest of today. Local midnight clears it.
-- [ ] Disable warn in prefs: dropping below 20 % does NOT fire warn, but does still fire critical when reaching 5 %.
-- [ ] Disable critical in prefs: dropping below 5 % fires nothing.
-- [ ] Prefs validation: dragging warn slider down is bounded by `critical + 1`; dragging critical up is bounded by `warn − 1`.
-- [ ] Prefs hot-reload: editing `config.toml` directly is reflected within ~1 s without a daemon restart.
-- [ ] `mxbattery prefs` from a terminal opens (or focuses) the prefs window.
-- [ ] Re-arm: charge above warn + 5 % then drop again on the next day — warn fires again.
-- [ ] Quit + relaunch: state file persists last_warn_notified_date so a relaunch on the same day does NOT re-fire.
-- [ ] launchctl install: `mxbattery install /Applications/MXBattery.app` registers the LaunchAgent, daemon is alive after `launchctl bootstrap`.
-- [ ] launchctl uninstall: `mxbattery uninstall` removes the LaunchAgent and stops the daemon.
-- [ ] launchctl uninstall --purge: removes the application-support directory.
-- [ ] Boot test: log out and back in; the daemon starts without intervention.
+## Build
+
+```bash
+./tools/make-app.sh
+open target/release/MXBattery.app
+```
+
+## TCC
+
+- First run on `open MXBattery.app`: Bluetooth permission prompt should appear. Allow it.
+- First decided-fire of a notification: notifications permission prompt should appear. Allow it.
+
+## Battery + charging signals
+
+- Menu bar icon updates within ~2 s of plug or unplug.
+- Charging bolt overlay appears within ~1 s of plug-in and disappears within ~1 s of unplug.
+
+## Notifications
+
+- **Warn:** drop battery below 20 % while discharging — exactly one notification fires within 5 s. A second drop on the same day stays silent.
+- **Critical:** drop below 5 % — first critical notification fires immediately; a second fires 30 min later if still below.
+- **Disable warn in prefs:** dropping below 20 % does not fire a warn, but still fires critical at 5 %.
+- **Disable critical in prefs:** dropping below 5 % fires nothing.
+- **Re-arm:** charge above `warn + rearm_hysteresis` then drop again on the next day — warn fires again.
+- **Quit + relaunch:** state file persists `last_warn_notified_date` so a relaunch on the same day does not re-fire.
+
+## Mute today
+
+- Clicking "Mute today" replaces the menu item title with "Unmute" and silences the rest of today. Local midnight clears it.
+
+## Prefs UI
+
+- Validation: dragging warn down is bounded by `critical + 1`; dragging critical up is bounded by `warn − 1`.
+- Hot-reload: editing `config.toml` directly is reflected within ~1 s without a daemon restart.
+- `mxbattery prefs` from a terminal opens (or focuses) the prefs window.
+- Double-clicking `MXBattery.app` while the daemon is already running brings up prefs.
+
+## launchd
+
+- `mxbattery install /Applications/MXBattery.app` registers the LaunchAgent. Daemon is alive after `launchctl bootstrap` (visible in `launchctl print gui/$UID/com.vincentahrend.mxbattery-app`).
+- `mxbattery uninstall` removes the LaunchAgent and stops the daemon.
+- `mxbattery uninstall --purge` also removes `~/Library/Application Support/MXBattery`.
+- Log out and back in: the daemon starts without intervention.
+
+## Frame-shape auto-probe
+
+- Force a wrong shape locally by editing `Inner::default()` in `src/battery/cb.rs` to start at `WithDevIdx19`. Rebuild, run, observe two retries in the log before settling on `NoDevIdx18`. Revert before committing.
+
+## Tag
+
+When every section above passes:
+
+```bash
+git tag v0.1.0
+git push --tags
+```
 ```
 
 - [ ] **Step 2: Commit**
 
 ```bash
 git add docs/dogfood-checklist.md
-git commit -m "docs: end-to-end dogfood checklist"
+git commit -m "docs: dogfood checklist"
 ```
 
-- [ ] **Step 3: Tag v0.1.0 once every box is checked**
+---
+
+### Task 24: Remove probes from the repo
+
+The probes in `probe-a/` and `probe-b/` were exploratory artefacts used while writing the spec. Now that the production codebase covers the same ground (and `tests/hidpp.rs` carries the captured fixtures), the probes are no longer needed.
+
+**Files:**
+- Remove: `probe-a/`
+- Remove: `probe-b/`
+- Modify: `.gitignore` (drop probe-related entries)
+
+- [ ] **Step 1: Confirm the captured frame fixtures live in `tests/hidpp.rs`**
+
+Run: `grep -n 'hex::decode' tests/hidpp.rs tests/hidpp_event.rs`
+Expected: hex strings preserved as test inputs (the same fixtures that were originally captured by probe-c).
+
+- [ ] **Step 2: Remove the probe directories**
 
 ```bash
-git tag v0.1.0
-git log --oneline -1
+git rm -r probe-a probe-b
+```
+
+- [ ] **Step 3: Trim `.gitignore`**
+
+Open `.gitignore` and remove every line under the "probe binaries" comment. The comment line itself can also be removed.
+
+- [ ] **Step 4: Verify the working tree is clean**
+
+Run: `git status`
+Expected: only the `.gitignore` modification staged; no untracked probe leftovers.
+
+- [ ] **Step 5: Commit + push**
+
+```bash
+git add .gitignore
+git commit -m "chore: remove probe artefacts (captured fixtures live in tests/)"
+git push
 ```
 
 ---
