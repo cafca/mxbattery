@@ -117,6 +117,22 @@ impl MenubarIcon {
         let (menu, mute_item) = build_menu(&target, mtm);
         unsafe { item.setMenu(Some(&menu)) };
 
+        // Render an initial placeholder icon so the status item is visible
+        // before the first battery reading arrives. Without this the button
+        // has no image and shows nothing.
+        let img = render_icon(0, ChargingState::Unknown);
+        unsafe {
+            match item.button(mtm) {
+                Some(button) => {
+                    button.setImage(Some(&img));
+                    tracing::info!("menubar: status item button installed with placeholder icon");
+                }
+                None => {
+                    tracing::warn!("menubar: NSStatusItem.button(mtm) returned None — icon will not be visible");
+                }
+            }
+        }
+
         Self {
             item,
             _target: target,
@@ -130,10 +146,13 @@ impl MenubarIcon {
     }
 
     pub fn render(&self, percent: u8, charging: ChargingState, mtm: MainThreadMarker) {
+        tracing::debug!(percent, ?charging, "menubar: rendering");
         let img = render_icon(percent, charging);
         unsafe {
             if let Some(button) = self.item.button(mtm) {
                 button.setImage(Some(&img));
+            } else {
+                tracing::warn!("menubar: button(mtm) None during render");
             }
         }
     }
