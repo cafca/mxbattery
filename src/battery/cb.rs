@@ -44,16 +44,17 @@ use crate::hidpp::FrameShape;
 // UUID constants (canonical lowercase without dashes for 16-bit short forms)
 // ---------------------------------------------------------------------------
 
-const UUID_180F: &str = "180F"; // Battery Service
-const UUID_180A: &str = "180A"; // Device Information Service
-const UUID_VENDOR_SVC: &str = "00010000-0000-1000-8000-011F2000046D";
-const UUID_2A19: &str = "2A19"; // Battery Level
-const UUID_2A24: &str = "2A24"; // Model Number String
-const UUID_2A50: &str = "2A50"; // PnP ID
-const UUID_VENDOR_CHAR: &str = "00010001-0000-1000-8000-011F2000046D";
+pub const UUID_180F: &str = "180F"; // Battery Service
+pub const UUID_180A: &str = "180A"; // Device Information Service
+pub const UUID_VENDOR_SVC: &str = "00010000-0000-1000-8000-011F2000046D";
+pub const UUID_2A19: &str = "2A19"; // Battery Level
+pub const UUID_2A24: &str = "2A24"; // Model Number String
+pub const UUID_2A50: &str = "2A50"; // PnP ID
+pub const UUID_VENDOR_CHAR: &str = "00010001-0000-1000-8000-011F2000046D";
 
-/// Number of services we wait for char-discovery on before running the probe.
-const EXPECTED_SERVICES: usize = 3;
+/// The full set of service UUIDs we enumerate characteristics for.
+/// Used in `didDiscoverServices` to count how many are actually present.
+const KNOWN_SERVICE_UUIDS: [&str; 3] = [UUID_180F, UUID_180A, UUID_VENDOR_SVC];
 
 // ---------------------------------------------------------------------------
 // Helper: build a CBUUID from a string literal
@@ -85,7 +86,10 @@ struct PeriphState {
     id: String,
     /// Peripheral name for the Connected event.
     name: String,
-    /// How many of the 3 expected services have completed char-discovery.
+    /// How many of the expected services were actually advertised by this
+    /// peripheral (set once in `didDiscoverServices`; 0 until then).
+    expected_services: usize,
+    /// How many of the expected services have completed char-discovery.
     services_done: usize,
     /// Whether we've passed the filter and emitted Connected.
     connected_emitted: bool,
@@ -126,6 +130,7 @@ impl PeriphState {
             },
             id,
             name,
+            expected_services: 0,
             services_done: 0,
             connected_emitted: false,
             char_battery_level: None,
@@ -236,10 +241,11 @@ declare_class!(
             // We won't know until we discover services, so start with false;
             // it will be patched in didDiscoverServices.
             {
+                // Always reset state on (re-)connect so that stale characteristic
+                // pointers and flags from a previous connection are discarded even
+                // if CoreBluetooth fires didConnectPeripheral before didDisconnect.
                 let mut inner = self.ivars().lock().unwrap();
-                inner.peripherals.entry(pid.clone()).or_insert_with(|| {
-                    PeriphState::new(pid.clone(), pname, false)
-                });
+                inner.peripherals.insert(pid.clone(), PeriphState::new(pid.clone(), pname, false));
             }
 
             // Set delegate again (defensive) and discover services.
@@ -304,15 +310,26 @@ declare_class!(
                 None => return,
             };
 
-            // Check whether the vendor service is present.
+            // Check which of the expected services are actually present and
+            // how many of them were returned, so char-discovery completion can
+            // be detected without hard-coding a count of 3.
             let has_vendor = services
                 .iter()
                 .any(|s| uuid_matches(&s.UUID(), UUID_VENDOR_SVC));
+
+            let expected_count = services
+                .iter()
+                .filter(|s| {
+                    let u = s.UUID();
+                    KNOWN_SERVICE_UUIDS.iter().any(|&k| uuid_matches(&u, k))
+                })
+                .count();
 
             {
                 let mut inner = self.ivars().lock().unwrap();
                 if let Some(st) = inner.peripherals.get_mut(&pid) {
                     st.probe.has_logitech_vendor_service = has_vendor;
+                    st.expected_services = expected_count;
                 }
             }
 
@@ -376,9 +393,9 @@ declare_class!(
                 st.services_done += 1;
             }
 
-            // Once all three expected services have reported their chars,
-            // kick off reads for the device-info characteristics.
-            if st.services_done >= EXPECTED_SERVICES {
+            // Once all expected services have reported their chars (and at least
+            // one expected service exists), kick off reads for device-info chars.
+            if st.expected_services > 0 && st.services_done >= st.expected_services {
                 let model_ptr = st.char_model_number;
                 let pnp_ptr = st.char_pnp_id;
                 drop(inner);
@@ -419,8 +436,13 @@ declare_class!(
                     _ => return,
                 };
                 tracing::debug!("2A19 battery level: {}% (peripheral {})", percent, pid);
+                // Only emit Percent if we passed the device filter and already
+                // sent Connected.  A stale OS subscription can deliver a 2A19
+                // notification even for a peripheral we rejected, so guard here.
                 let inner = self.ivars().lock().unwrap();
-                inner.send(BatteryEvent::Percent(percent));
+                if inner.peripherals.get(&pid).map_or(false, |st| st.connected_emitted) {
+                    inner.send(BatteryEvent::Percent(percent));
+                }
                 return;
             }
 
@@ -582,11 +604,18 @@ impl Drop for CbBackend {
         // Release the retained ObjC objects.
         // SAFETY: must be called on the main thread; see struct doc.
         unsafe {
-            if !self._delegate.is_null() {
-                objc2::rc::Retained::from_raw(self._delegate as *mut Delegate);
-            }
+            // Nil the manager's delegate FIRST so CoreBluetooth cannot fire
+            // callbacks against the delegate after it has been released.
             if !self._manager.is_null() {
-                objc2::rc::Retained::from_raw(self._manager as *mut CBCentralManager);
+                let null_delegate: *const objc2::runtime::AnyObject = std::ptr::null();
+                let _: () = objc2::msg_send![&*self._manager, setDelegate: null_delegate];
+            }
+            // Now release the manager, then the delegate.
+            if !self._manager.is_null() {
+                let _ = objc2::rc::Retained::<CBCentralManager>::from_raw(self._manager);
+            }
+            if !self._delegate.is_null() {
+                let _ = objc2::rc::Retained::<Delegate>::from_raw(self._delegate);
             }
         }
     }
