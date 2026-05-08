@@ -600,6 +600,7 @@ dependencies = [
  "dirs",
  "hex",
  "humantime-serde",
+ "libc",
  "notify",
  "objc2",
  "objc2-app-kit",

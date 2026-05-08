@@ -38,6 +38,7 @@ dirs = "5"
 anyhow = "1"
 thiserror = "1"
 humantime-serde = "1"
+libc = "0.2"
 
 [dev-dependencies]
 pretty_assertions = "1"
