@@ -1,5 +1,7 @@
 //! MXBattery — Logitech BLE mouse battery monitor for macOS.
 
+#[cfg(target_os = "macos")]
+pub mod app;
 pub mod battery;
 pub mod config;
 pub mod device_filter;
@@ -18,6 +20,10 @@ pub mod state;
 pub fn run() -> anyhow::Result<()> {
     logging::init();
     tracing::info!(version = %env!("CARGO_PKG_VERSION"), "mxbattery starting");
+    #[cfg(target_os = "macos")]
+    {
+        crate::app::run_daemon()?;
+    }
     Ok(())
 }
 
