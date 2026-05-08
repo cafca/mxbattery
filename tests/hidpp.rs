@@ -1,4 +1,4 @@
-use mxbattery::hidpp::{decode, encode_get_feature, encode_get_battery_level_status, FrameShape};
+use mxbattery::hidpp::{decode, encode_get_battery_level_status, encode_get_feature, FrameShape};
 
 const SHAPE: FrameShape = FrameShape::NoDevIdx18;
 

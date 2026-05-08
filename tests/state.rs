@@ -1,5 +1,5 @@
 use chrono::{Local, NaiveDate, TimeZone};
-use mxbattery::state::{ChargingState, BatteryReadingSnapshot, State};
+use mxbattery::state::{BatteryReadingSnapshot, ChargingState, State};
 
 #[test]
 fn round_trip_through_json() {

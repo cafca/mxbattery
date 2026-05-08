@@ -22,8 +22,7 @@ pub fn matches(filter: &DeviceFilter, probe: &DeviceProbe) -> bool {
             .map(|m| m.starts_with("MX "))
             .unwrap_or(false),
         DeviceFilter::AnyLogitech => {
-            probe.has_logitech_vendor_service
-                || probe.pnp_vid == Some(LOGITECH_VID)
+            probe.has_logitech_vendor_service || probe.pnp_vid == Some(LOGITECH_VID)
         }
     }
 }

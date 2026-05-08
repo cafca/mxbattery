@@ -1,5 +1,5 @@
 use mxbattery::config::DeviceFilter;
-use mxbattery::device_filter::{DeviceProbe, matches};
+use mxbattery::device_filter::{matches, DeviceProbe};
 
 fn mx_master_3() -> DeviceProbe {
     DeviceProbe {
@@ -24,7 +24,9 @@ fn airpods_pro() -> DeviceProbe {
 #[test]
 fn specific_matches_by_identifier() {
     let p = mx_master_3();
-    let f = DeviceFilter::Specific { identifier: p.peripheral_identifier.clone() };
+    let f = DeviceFilter::Specific {
+        identifier: p.peripheral_identifier.clone(),
+    };
     assert!(matches(&f, &p));
 }
 

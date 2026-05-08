@@ -40,12 +40,16 @@ pub struct HidppFrame {
 }
 
 impl HidppFrame {
-    pub fn is_event(&self) -> bool { self.swid == 0 }
+    pub fn is_event(&self) -> bool {
+        self.swid == 0
+    }
 }
 
 fn put_header(buf: &mut [u8], shape: FrameShape, feature_index: u8, function: u8, swid: u8) {
     let off = shape.featidx_off();
-    if shape == FrameShape::WithReportId20 { buf[0] = 0x11; }
+    if shape == FrameShape::WithReportId20 {
+        buf[0] = 0x11;
+    }
     if matches!(shape, FrameShape::WithDevIdx19 | FrameShape::WithReportId20) {
         buf[off - 1] = 0xFF;
     }
@@ -64,19 +68,32 @@ pub fn encode_get_feature(shape: FrameShape, feature_id: u16, swid: u8) -> Vec<u
 
 pub fn encode_get_battery_level_status(shape: FrameShape, feature_index: u8, swid: u8) -> Vec<u8> {
     let mut buf = vec![0u8; shape.frame_len()];
-    put_header(&mut buf, shape, feature_index, FN_GET_BATTERY_LEVEL_STATUS, swid);
+    put_header(
+        &mut buf,
+        shape,
+        feature_index,
+        FN_GET_BATTERY_LEVEL_STATUS,
+        swid,
+    );
     buf
 }
 
 pub fn decode(shape: FrameShape, buf: &[u8]) -> Option<HidppFrame> {
     let off = shape.featidx_off();
-    if buf.len() < off + 2 { return None; }
+    if buf.len() < off + 2 {
+        return None;
+    }
     let feature_index = buf[off];
     let fn_swid = buf[off + 1];
     let function = fn_swid >> 4;
     let swid = fn_swid & 0x0F;
     let params = buf[off + 2..].to_vec();
-    Some(HidppFrame { feature_index, function, swid, params })
+    Some(HidppFrame {
+        feature_index,
+        function,
+        swid,
+        params,
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -101,6 +118,8 @@ impl ChargingStateRaw {
 }
 
 pub fn decode_battery_status(params: &[u8]) -> Option<(u8, u8, ChargingStateRaw)> {
-    if params.len() < 3 { return None; }
+    if params.len() < 3 {
+        return None;
+    }
     Some((params[0], params[1], ChargingStateRaw::from_byte(params[2])))
 }

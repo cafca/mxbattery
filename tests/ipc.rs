@@ -1,4 +1,4 @@
-use mxbattery::ipc::{send_open_prefs, IpcServer, IpcCommand};
+use mxbattery::ipc::{send_open_prefs, IpcCommand, IpcServer};
 use std::time::Duration;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -10,7 +10,10 @@ async fn second_instance_lands_open_prefs() {
     let recv = tokio::spawn({
         let mut events = server.subscribe();
         async move {
-            tokio::time::timeout(Duration::from_secs(1), events.recv()).await.unwrap().unwrap()
+            tokio::time::timeout(Duration::from_secs(1), events.recv())
+                .await
+                .unwrap()
+                .unwrap()
         }
     });
 
