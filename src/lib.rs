@@ -4,6 +4,7 @@ pub mod config;
 pub mod hidpp;
 pub mod logging;
 pub mod paths;
+pub mod state;
 
 pub fn run() -> anyhow::Result<()> {
     logging::init();
