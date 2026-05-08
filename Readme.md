@@ -4,9 +4,7 @@ The Logitech MX Master 3 is a fantastic mouse but I was surprised once too often
 
 This is a small utility, which shows a macOS notification, by default when battery drops to 20% and another one at 5%. It also adds a menu bar icon showing the battery percentage, which can also be disabled.
 
-The design of the tool is based on HID++ events and it's written in Rust, it uses very little resources. There is no polling: the daemon subscribes to BLE GATT notifications for the battery level and to spontaneous HID++ events for the charging state, so it sits at effectively 0 % CPU between events. The whole thing weighs about 2 MB on disk and 10–15 MB resident.
-
-It only uses public CoreBluetooth APIs — no private frameworks, no `IOHID`, no Input Monitoring permission. All you have to grant on first launch is Bluetooth and Notifications.
+The design is event-driven: there is no polling. The daemon subscribes to BLE GATT notifications for the battery level and to spontaneous HID++ events for the charging state, so it sits at effectively 0 % CPU between events. The release binary is about 2 MB on disk; the running process holds ~50 MB of resident memory (Activity Monitor's "Real Memory" reads ~80 MB — most of that is shared CoreBluetooth, AppKit and Foundation pages mapped into the process). Lighter than Logi Options+, but it's not free.
 
 ![CI](https://github.com/cafca/mxbattery/actions/workflows/ci.yml/badge.svg)
 
