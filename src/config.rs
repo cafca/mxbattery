@@ -116,3 +116,48 @@ impl Config {
         Ok(())
     }
 }
+
+use arc_swap::ArcSwap;
+use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher as _};
+use std::path::PathBuf;
+use std::sync::Arc;
+
+pub struct ConfigWatcher {
+    current: Arc<ArcSwap<Config>>,
+    _watcher: RecommendedWatcher,
+    _path: PathBuf,
+}
+
+impl ConfigWatcher {
+    pub fn start(path: PathBuf) -> Result<Self, ConfigError> {
+        let initial = Config::load(&path)?;
+        let current = Arc::new(ArcSwap::from_pointee(initial));
+        let cur = current.clone();
+        let watch_path = std::fs::canonicalize(&path).unwrap_or(path.clone());
+        let dir = path.parent().unwrap().to_path_buf();
+        let mut watcher = notify::recommended_watcher(move |res: notify::Result<Event>| {
+            let Ok(event) = res else { return };
+            if !matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)) {
+                return;
+            }
+            if !event.paths.iter().any(|p| p == &watch_path) { return; }
+            match Config::load(&watch_path) {
+                Ok(c) => {
+                    tracing::info!("config reloaded");
+                    cur.store(Arc::new(c));
+                }
+                Err(e) => tracing::warn!(?e, "ignoring bad config; keeping previous"),
+            }
+        })?;
+        watcher.watch(&dir, RecursiveMode::NonRecursive)?;
+        Ok(Self { current, _watcher: watcher, _path: path })
+    }
+
+    pub fn current(&self) -> Arc<Config> { self.current.load_full() }
+
+    pub fn handle(&self) -> Arc<ArcSwap<Config>> { self.current.clone() }
+}
+
+impl From<notify::Error> for ConfigError {
+    fn from(e: notify::Error) -> Self { ConfigError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)) }
+}
