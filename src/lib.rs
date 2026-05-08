@@ -7,6 +7,8 @@ pub mod hidpp;
 pub mod logging;
 #[cfg(target_os = "macos")]
 pub mod menubar;
+#[cfg(target_os = "macos")]
+pub mod prefs_ui;
 pub mod notifier;
 pub mod paths;
 pub mod state;
