@@ -4,8 +4,6 @@ The Logitech MX Master 3 is a fantastic mouse but I was surprised once too often
 
 This is a small utility, which shows a macOS notification, by default when battery drops to 20% and another one at 5%. It also adds a menu bar icon showing the battery percentage, which can also be disabled.
 
-The design is event-driven: there is no polling. The daemon subscribes to BLE GATT notifications for the battery level and to spontaneous HID++ events for the charging state, so it sits at effectively 0 % CPU between events. The release binary is about 2 MB on disk; the running process holds ~50 MB of resident memory (Activity Monitor's "Real Memory" reads ~80 MB — most of that is shared CoreBluetooth, AppKit and Foundation pages mapped into the process). Lighter than Logi Options+, but it's not free.
-
 ![CI](https://github.com/cafca/mxbattery/actions/workflows/ci.yml/badge.svg)
 
 ## Usage
@@ -20,13 +18,6 @@ open target/release/MXBattery.app
 ```
 
 The first launch prompts for Bluetooth and (on the first notification) Notifications permissions. Approve both.
-
-To run automatically at login, register the LaunchAgent:
-
-```bash
-./target/release/MXBattery.app/Contents/MacOS/mxbattery install \
-    "$(pwd)/target/release/MXBattery.app"
-```
 
 ### Configure
 
@@ -81,7 +72,7 @@ Contributions are welcome — but **please open an issue first** so we can agree
 When filing a bug, please include:
 
 - Your macOS version and Mac model.
-- Device name and firmware version (`mxbattery read` plus the macOS Bluetooth menu).
+- Device name (and firmware version if you know it).
 - Daemon logs covering the issue, with `MXBATTERY_LOG=debug` set.
 
 How to capture logs depends on how the daemon is running:
@@ -94,8 +85,6 @@ How to capture logs depends on how the daemon is running:
   MXBATTERY_LOG=debug open --stderr /tmp/mxb.err target/release/MXBattery.app
   tail -F /tmp/mxb.err
   ```
-
-The full design and implementation plan live under [`docs/superpowers/`](docs/superpowers/) for anyone who wants to understand the codebase before contributing.
 
 ## License
 
