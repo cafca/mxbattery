@@ -28,6 +28,7 @@ enum MainMsg {
         percent: u8,
         charging: ChargingState,
     },
+    SetVisible(bool),
     OpenPrefs,
     SetMuted(bool),
     SetMenubarEnabled(bool),
@@ -152,6 +153,15 @@ pub fn run_daemon() -> anyhow::Result<()> {
         let mut last_menubar_enabled = cfg_handle_for_task.load_full().menubar.enabled;
         let mut cfg_tick = tokio::time::interval(std::time::Duration::from_millis(500));
         cfg_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        // Connection / visibility tracking. We hide the menubar icon when no
+        // mouse is connected, with a 5-second grace period to avoid flicker
+        // on transient BLE drops.
+        let mut connected_count: usize = 0;
+        let mut have_reading = false;
+        let mut visible = false;
+        let mut hide_at: Option<tokio::time::Instant> = None;
+        const HIDE_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
         loop {
             tokio::select! {
                 _ = cfg_tick.tick() => {
@@ -161,15 +171,42 @@ pub fn run_daemon() -> anyhow::Result<()> {
                         let _ = main_tx_cfg.send(MainMsg::SetMenubarEnabled(cur));
                     }
                 }
+                _ = async {
+                    match hide_at {
+                        Some(t) => tokio::time::sleep_until(t).await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    hide_at = None;
+                    if visible {
+                        visible = false;
+                        let _ = main_tx_bat.send(MainMsg::SetVisible(false));
+                    }
+                }
                 ev = bat_rx.recv() => {
                     let Ok(ev) = ev else { continue };
                     match ev {
                         BatteryEvent::Connected { name } => {
                             device_name = name;
+                            connected_count += 1;
+                            hide_at = None;
+                            tracing::info!(connected_count, have_reading, visible, "app: BatteryEvent::Connected");
+                            if have_reading && !visible {
+                                visible = true;
+                                let _ = main_tx_bat.send(MainMsg::SetVisible(true));
+                            }
                         }
-                        BatteryEvent::Disconnected => {}
+                        BatteryEvent::Disconnected => {
+                            connected_count = connected_count.saturating_sub(1);
+                            tracing::info!(connected_count, visible, "app: BatteryEvent::Disconnected");
+                            if connected_count == 0 && visible {
+                                hide_at = Some(tokio::time::Instant::now() + HIDE_GRACE);
+                            }
+                        }
                         BatteryEvent::Percent(p) => {
                             last_percent = p;
+                            have_reading = true;
+                            hide_at = None;
                             handle_reading(
                                 &cfg_handle_for_task,
                                 &paths_for_task,
@@ -182,9 +219,15 @@ pub fn run_daemon() -> anyhow::Result<()> {
                                 percent: last_percent,
                                 charging: last_charging,
                             });
+                            if !visible {
+                                visible = true;
+                                let _ = main_tx_bat.send(MainMsg::SetVisible(true));
+                            }
                         }
                         BatteryEvent::Charging(c) => {
                             last_charging = c;
+                            have_reading = true;
+                            hide_at = None;
                             handle_reading(
                                 &cfg_handle_for_task,
                                 &paths_for_task,
@@ -197,6 +240,10 @@ pub fn run_daemon() -> anyhow::Result<()> {
                                 percent: last_percent,
                                 charging: last_charging,
                             });
+                            if !visible {
+                                visible = true;
+                                let _ = main_tx_bat.send(MainMsg::SetVisible(true));
+                            }
                         }
                     }
                 }
@@ -243,11 +290,15 @@ pub fn run_daemon() -> anyhow::Result<()> {
     let menubar_slot = std::rc::Rc::new(std::cell::RefCell::new(menubar));
     // Track the most recent battery reading so we can render after a fresh install.
     let last_reading = std::rc::Rc::new(std::cell::Cell::new((0u8, ChargingState::Unknown)));
+    // Track whether the icon should currently be visible, so a config-toggle
+    // re-install can restore the right visibility (hidden when no mouse).
+    let visible_state = std::rc::Rc::new(std::cell::Cell::new(false));
     let timer_block = {
         let main_rx = Arc::clone(&main_rx);
         let menubar_slot = std::rc::Rc::clone(&menubar_slot);
         let menubar_tx = menubar_tx.clone();
         let last_reading = std::rc::Rc::clone(&last_reading);
+        let visible_state = std::rc::Rc::clone(&visible_state);
         RcBlock::new(move |_timer: NonNull<NSTimer>| {
             let mtm_inner = match MainThreadMarker::new() {
                 Some(m) => m,
@@ -260,6 +311,12 @@ pub fn run_daemon() -> anyhow::Result<()> {
                         last_reading.set((percent, charging));
                         if let Some(mb) = menubar_slot.borrow().as_ref() {
                             mb.render(percent, charging, mtm_inner);
+                        }
+                    }
+                    MainMsg::SetVisible(v) => {
+                        visible_state.set(v);
+                        if let Some(mb) = menubar_slot.borrow().as_ref() {
+                            mb.set_visible(v);
                         }
                     }
                     MainMsg::OpenPrefs => {
@@ -280,6 +337,7 @@ pub fn run_daemon() -> anyhow::Result<()> {
                                 mb.set_command_channel(menubar_tx.clone());
                                 let (p, c) = last_reading.get();
                                 mb.render(p, c, mtm_inner);
+                                mb.set_visible(visible_state.get());
                                 *slot = Some(mb);
                             }
                             (false, true) => {
