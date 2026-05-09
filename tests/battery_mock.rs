@@ -7,6 +7,7 @@ async fn mock_emits_recorded_events() {
     let mut events = vec![
         BatteryEvent::Connected {
             name: "MX Master 3 Mac".into(),
+            identifier: "TEST-UUID".into(),
         },
         BatteryEvent::Percent(17),
         BatteryEvent::Charging(ChargingState::Recharging),

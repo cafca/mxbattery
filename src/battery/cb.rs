@@ -719,7 +719,10 @@ declare_class!(
                 // Emit Connected.
                 {
                     let inner = self.ivars().lock().unwrap();
-                    inner.send(BatteryEvent::Connected { name });
+                    inner.send(BatteryEvent::Connected {
+                        name,
+                        identifier: pid.clone(),
+                    });
                 }
 
                 // Subscribe to notifications and read initial battery value.

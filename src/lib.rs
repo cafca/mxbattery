@@ -8,6 +8,7 @@ pub mod device_filter;
 pub mod hidpp;
 pub mod ipc;
 pub mod launchd;
+pub mod live_state;
 pub mod logging;
 #[cfg(target_os = "macos")]
 pub mod menubar;
