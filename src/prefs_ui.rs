@@ -183,43 +183,62 @@ impl PrefsTarget {
                     return;
                 }
                 // Call launchd if the autostart setting changed.
+                //
+                // We never run launchctl from inside the daemon process directly:
+                // doing so creates a race where launchd schedules a new copy of the
+                // daemon while the current one is still alive holding the IPC socket.
+                // Instead we spawn a detached `mxbattery install` / `mxbattery uninstall`
+                // child process and, when installing, terminate ourselves so launchd's
+                // freshly bootstrapped copy can take over cleanly.
                 if new_autostart != prev_autostart {
+                    let exe = std::env::current_exe().ok();
                     if new_autostart {
-                        // Derive the .app bundle path from the running binary.
-                        // The binary lives at …/MXBattery.app/Contents/MacOS/mxbattery,
-                        // so .parent().parent().parent() is the .app directory.
-                        match std::env::current_exe() {
-                            Ok(exe) => {
-                                let app_path = exe
-                                    .parent()
-                                    .and_then(|p| p.parent())
-                                    .and_then(|p| p.parent())
-                                    .map(|p| p.to_path_buf());
-                                match app_path {
-                                    Some(ref p)
-                                        if p.extension().and_then(|e| e.to_str())
-                                            == Some("app") =>
-                                    {
-                                        if let Err(e) =
-                                            crate::launchd::install(&p.to_string_lossy())
-                                        {
-                                            tracing::warn!(?e, "launchd install failed");
+                        let app_path = exe.as_ref().and_then(|e| {
+                            e.parent()
+                                .and_then(|p| p.parent())
+                                .and_then(|p| p.parent())
+                                .map(|p| p.to_path_buf())
+                        });
+                        match (exe.as_ref(), app_path) {
+                            (Some(exe), Some(p))
+                                if p.extension().and_then(|e| e.to_str()) == Some("app") =>
+                            {
+                                let app_str = p.to_string_lossy().into_owned();
+                                match std::process::Command::new(exe)
+                                    .args(["install", &app_str])
+                                    .spawn()
+                                {
+                                    Ok(_) => {
+                                        tracing::info!(
+                                            "spawned launchd install helper; \
+                                             terminating so launchd can take over"
+                                        );
+                                        // Update saved baseline so any re-entry doesn't
+                                        // re-spawn — though we're about to exit anyway.
+                                        self.ivars().original_autostart_enabled.set(true);
+                                        if let Some(mtm) = MainThreadMarker::new() {
+                                            let app = NSApplication::sharedApplication(mtm);
+                                            unsafe { app.terminate(None) };
                                         }
+                                        return;
                                     }
-                                    _ => tracing::warn!(
-                                        "running unbundled — skipping launchd install"
-                                    ),
+                                    Err(e) => {
+                                        tracing::warn!(?e, "failed to spawn install helper")
+                                    }
                                 }
                             }
-                            Err(e) => tracing::warn!(
-                                ?e,
-                                "current_exe() failed — skipping launchd install"
-                            ),
+                            _ => tracing::warn!("running unbundled — skipping launchd install"),
                         }
-                    } else if let Err(e) = crate::launchd::uninstall(false) {
-                        tracing::warn!(?e, "launchd uninstall failed");
+                    } else if let Some(exe) = exe.as_ref() {
+                        // Uninstall: detached child does the launchctl dance. If we are
+                        // currently the LaunchAgent, bootout will SIGTERM us; if we are
+                        // running standalone (e.g. via `open`), we keep running with the
+                        // plist removed.
+                        if let Err(e) = std::process::Command::new(exe).args(["uninstall"]).spawn()
+                        {
+                            tracing::warn!(?e, "failed to spawn uninstall helper");
+                        }
                     }
-                    // Update the stored original so a re-save doesn't call launchd again.
                     self.ivars().original_autostart_enabled.set(new_autostart);
                 }
             }
