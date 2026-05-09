@@ -64,9 +64,18 @@ jobs:
       - name: Bump Cargo.toml + Cargo.lock and tag
         run: |
           set -euo pipefail
+          current=$(awk -F'"' '/^version *= */ {print $2; exit}' Cargo.toml)
+          if [[ "$current" == "$VERSION" ]]; then
+            echo "::error::Cargo.toml already at $VERSION; pick a higher version"
+            exit 1
+          fi
           cargo install cargo-edit --locked
           cargo set-version "$VERSION"
           cargo update -p mxbattery
+          if git diff --quiet -- Cargo.toml Cargo.lock; then
+            echo "::error::cargo set-version produced no diff (current=$current input=$VERSION)"
+            exit 1
+          fi
           git add Cargo.toml Cargo.lock
           git commit -m "chore: release $TAG"
           git tag "$TAG"
