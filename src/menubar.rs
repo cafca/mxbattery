@@ -125,9 +125,9 @@ impl MenubarIcon {
         let (menu, mute_item, status_item) = build_menu(&target, mtm);
         unsafe { item.setMenu(Some(&menu)) };
 
-        // Render an initial placeholder icon so the status item is visible
-        // before the first battery reading arrives. Without this the button
-        // has no image and shows nothing.
+        // Render an initial placeholder icon so the button has something to
+        // show once it becomes visible. The status item itself starts hidden
+        // and is shown only after the first battery reading arrives.
         let img = render_icon(0, ChargingState::Unknown);
         unsafe {
             match item.button(mtm) {
@@ -139,6 +139,7 @@ impl MenubarIcon {
                     tracing::warn!("menubar: NSStatusItem.button(mtm) returned None — icon will not be visible");
                 }
             }
+            item.setVisible(false);
         }
 
         Self {
@@ -166,6 +167,12 @@ impl MenubarIcon {
             self.status_item
                 .setTitle(&NSString::from_str(&format_status(percent, charging)));
         }
+    }
+
+    /// Show or hide the menubar icon. Used to hide on mouse disconnect.
+    pub fn set_visible(&self, visible: bool) {
+        tracing::info!(visible, "menubar: set_visible");
+        unsafe { self.item.setVisible(visible) };
     }
 
     /// Update the "Mute today" item label based on muted state.

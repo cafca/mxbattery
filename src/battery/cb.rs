@@ -397,20 +397,26 @@ declare_class!(
         #[method(centralManager:didDisconnectPeripheral:error:)]
         unsafe fn centralManager_didDisconnectPeripheral_error(
             &self,
-            _central: &CBCentralManager,
+            central: &CBCentralManager,
             peripheral: &CBPeripheral,
             error: Option<&objc2_foundation::NSError>,
         ) {
             let pid = peripheral.identifier().UUIDString().to_string();
             tracing::debug!("disconnected: {} err={:?}", pid, error.map(|e| e.to_string()));
-            let mut inner = self.ivars().lock().unwrap();
-            if let Some(st) = inner.peripherals.remove(&pid) {
-                if st.connected_emitted {
-                    inner.send(BatteryEvent::Disconnected);
+            {
+                let mut inner = self.ivars().lock().unwrap();
+                if let Some(st) = inner.peripherals.remove(&pid) {
+                    if st.connected_emitted {
+                        inner.send(BatteryEvent::Disconnected);
+                    }
                 }
             }
-            // CoreBluetooth will re-fire didConnectPeripheral when the device
-            // comes back; we clean state and let the reconnect re-run steps 2–5.
+            // CoreBluetooth does not auto-reconnect after a disconnect.
+            // Re-arm a pending connect so the next time the peripheral is in
+            // range and powered-on, didConnectPeripheral fires again and
+            // steps 2-5 re-run (service/char discovery, subscriptions, reads).
+            tracing::debug!("re-arming connect for {}", pid);
+            central.connectPeripheral_options(peripheral, None);
         }
     }
 
