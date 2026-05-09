@@ -4,26 +4,31 @@
 //! The window is created once and re-shown on subsequent calls.
 
 use std::cell::Cell;
+use std::ptr::NonNull;
 use std::sync::Mutex;
 use std::time::Duration;
 
+use block2::RcBlock;
 use objc2::mutability::MainThreadOnly;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{declare_class, msg_send_id, sel, ClassType, DeclaredClass};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSButton,
-    NSControlStateValueOff, NSControlStateValueOn, NSPopUpButton, NSStackView,
+    NSControlStateValueOff, NSControlStateValueOn, NSFont, NSPopUpButton, NSStackView,
     NSStackViewDistribution, NSStackViewGravity, NSStepper, NSTextField,
     NSUserInterfaceLayoutOrientation, NSView, NSWindow, NSWindowDelegate, NSWindowStyleMask,
 };
 use objc2_foundation::{
     MainThreadMarker, NSArray, NSDate, NSDefaultRunLoopMode, NSEdgeInsets, NSNotification,
-    NSObject, NSObjectProtocol, NSPoint, NSRect, NSRunLoop, NSSize, NSString,
+    NSObject, NSObjectProtocol, NSPoint, NSRect, NSRunLoop, NSRunLoopCommonModes, NSSize, NSString,
+    NSTimer,
 };
 
 use crate::config::{Autostart, Cadence, Config, DeviceFilter, MenubarConfig, Thresholds};
+use crate::live_state;
 use crate::paths::Paths;
+use crate::state::ChargingState;
 
 // ---------------------------------------------------------------------------
 // Form state held in Ivars
@@ -68,6 +73,13 @@ struct PrefsTargetIvars {
 
     // Original autostart.enabled so Save can detect changes and call launchd.
     original_autostart_enabled: Cell<bool>,
+
+    // Live device-state read-out labels (populated by `refresh_live_state`).
+    live_name_value: Cell<*mut NSTextField>,
+    live_id_value: Cell<*mut NSTextField>,
+    live_status_value: Cell<*mut NSTextField>,
+    live_battery_value: Cell<*mut NSTextField>,
+    live_charging_value: Cell<*mut NSTextField>,
 }
 
 // SAFETY: All raw pointers are only ever dereferenced on the main thread.
@@ -161,6 +173,11 @@ impl PrefsTarget {
             original_warn_period: Mutex::new(Duration::from_secs(24 * 60 * 60)),
             original_rearm_hysteresis: Cell::new(5),
             original_autostart_enabled: Cell::new(false),
+            live_name_value: Cell::new(std::ptr::null_mut()),
+            live_id_value: Cell::new(std::ptr::null_mut()),
+            live_status_value: Cell::new(std::ptr::null_mut()),
+            live_battery_value: Cell::new(std::ptr::null_mut()),
+            live_charging_value: Cell::new(std::ptr::null_mut()),
         };
         let this = mtm.alloc::<Self>().set_ivars(ivars);
         unsafe { msg_send_id![super(this), init] }
@@ -462,6 +479,65 @@ impl PrefsTarget {
         self.update_stepper_bounds();
         self.update_enabled_states();
         self.update_save_state();
+        self.refresh_live_state();
+    }
+
+    /// Read the current live device snapshot and update the read-out labels.
+    /// Called from a 1 s `NSTimer` while the prefs window exists, plus once
+    /// from `load_config` so the window opens already populated.
+    fn refresh_live_state(&self) {
+        let snap = live_state::handle().load_full();
+        let daemon_running = live_state::daemon_running();
+
+        let dash = || NSString::from_str("—");
+
+        let (name_text, id_text, status_text) = if !daemon_running {
+            (dash(), dash(), NSString::from_str("Daemon not running"))
+        } else if !snap.connected {
+            (dash(), dash(), NSString::from_str("Searching\u{2026}"))
+        } else {
+            let n = snap
+                .device_name
+                .as_deref()
+                .map(NSString::from_str)
+                .unwrap_or_else(dash);
+            let i = snap
+                .identifier
+                .as_deref()
+                .map(NSString::from_str)
+                .unwrap_or_else(dash);
+            (n, i, NSString::from_str("Connected"))
+        };
+
+        let battery_text = match snap.last_percent {
+            Some(p) => NSString::from_str(&format!("{} %", p)),
+            None => dash(),
+        };
+
+        let charging_text = if !snap.connected {
+            dash()
+        } else {
+            NSString::from_str(match snap.charging {
+                ChargingState::Recharging | ChargingState::ChargeInFinalState => "yes",
+                ChargingState::ChargeComplete => "yes (full)",
+                ChargingState::Discharging => "no",
+                ChargingState::Unknown => "unknown",
+            })
+        };
+
+        unsafe {
+            let set = |cell: &Cell<*mut NSTextField>, s: &NSString| {
+                let p = cell.get();
+                if !p.is_null() {
+                    (*p).setStringValue(s);
+                }
+            };
+            set(&self.ivars().live_name_value, &name_text);
+            set(&self.ivars().live_id_value, &id_text);
+            set(&self.ivars().live_status_value, &status_text);
+            set(&self.ivars().live_battery_value, &battery_text);
+            set(&self.ivars().live_charging_value, &charging_text);
+        }
     }
 }
 
@@ -701,6 +777,41 @@ fn build_prefs_window(
         mtm,
     );
 
+    // --- Live device state read-out ---
+    let live_header = unsafe {
+        let l = NSTextField::labelWithString(&NSString::from_str("Current device"), mtm);
+        let font = NSFont::boldSystemFontOfSize(NSFont::systemFontSize());
+        l.setFont(Some(&font));
+        l
+    };
+
+    let live_name_lbl = make_label("Name:", mtm);
+    let live_name_val = make_label("\u{2014}", mtm);
+    let live_name_row = hstack(&[&*live_name_lbl, &*live_name_val], 6.0, mtm);
+
+    let live_id_lbl = make_label("Identifier:", mtm);
+    let live_id_val = make_label("\u{2014}", mtm);
+    unsafe {
+        live_id_val.setSelectable(true);
+        let mono = NSFont::userFixedPitchFontOfSize(11.0);
+        if let Some(f) = mono {
+            live_id_val.setFont(Some(&f));
+        }
+    }
+    let live_id_row = hstack(&[&*live_id_lbl, &*live_id_val], 6.0, mtm);
+
+    let live_status_lbl = make_label("Status:", mtm);
+    let live_status_val = make_label("\u{2014}", mtm);
+    let live_status_row = hstack(&[&*live_status_lbl, &*live_status_val], 6.0, mtm);
+
+    let live_battery_lbl = make_label("Battery:", mtm);
+    let live_battery_val = make_label("\u{2014}", mtm);
+    let live_battery_row = hstack(&[&*live_battery_lbl, &*live_battery_val], 6.0, mtm);
+
+    let live_charging_lbl = make_label("Charging:", mtm);
+    let live_charging_val = make_label("\u{2014}", mtm);
+    let live_charging_row = hstack(&[&*live_charging_lbl, &*live_charging_val], 6.0, mtm);
+
     // --- Other flags ---
     let menubar_check = make_checkbox(
         "Show menu bar icon",
@@ -809,6 +920,26 @@ fn build_prefs_window(
         .ivars()
         .save_button
         .set(Retained::as_ptr(&save_btn) as *mut _);
+    target
+        .ivars()
+        .live_name_value
+        .set(Retained::as_ptr(&live_name_val) as *mut _);
+    target
+        .ivars()
+        .live_id_value
+        .set(Retained::as_ptr(&live_id_val) as *mut _);
+    target
+        .ivars()
+        .live_status_value
+        .set(Retained::as_ptr(&live_status_val) as *mut _);
+    target
+        .ivars()
+        .live_battery_value
+        .set(Retained::as_ptr(&live_battery_val) as *mut _);
+    target
+        .ivars()
+        .live_charging_value
+        .set(Retained::as_ptr(&live_charging_val) as *mut _);
 
     // Apply initial enabled/bound state (before loading config)
     target.update_stepper_bounds();
@@ -831,6 +962,12 @@ fn build_prefs_window(
             &*crit_check,
             &*crit_row,
             &*period_row,
+            &*live_header,
+            &*live_name_row,
+            &*live_id_row,
+            &*live_status_row,
+            &*live_battery_row,
+            &*live_charging_row,
             &*menubar_check,
             &*autostart_check,
             &*button_row,
@@ -874,6 +1011,23 @@ fn build_prefs_window(
 
     // Re-load the passed config into the controls
     target.load_config(cfg);
+
+    // Schedule a 1 s timer that refreshes the live device-state read-out.
+    // Lives for the lifetime of the cached prefs window (we never tear it
+    // down). The block captures a strong `Retained<PrefsTarget>` so it can
+    // be invoked even if the window is closed and reopened.
+    {
+        let target_for_block = target.clone();
+        let block = RcBlock::new(move |_t: NonNull<NSTimer>| {
+            target_for_block.refresh_live_state();
+        });
+        let timer =
+            unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(1.0, true, &block) };
+        let run_loop = unsafe { NSRunLoop::mainRunLoop() };
+        unsafe {
+            run_loop.addTimer_forMode(&timer, NSRunLoopCommonModes);
+        }
+    }
 
     (window, target)
 }

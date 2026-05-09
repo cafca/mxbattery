@@ -17,6 +17,7 @@ use objc2_foundation::{MainThreadMarker, NSObject, NSObjectProtocol, NSRunLoop, 
 use crate::battery::{cb::CbBackend, BatteryBackend, BatteryEvent};
 use crate::config::ConfigWatcher;
 use crate::ipc::IpcServer;
+use crate::live_state::{self, LiveDeviceState};
 use crate::menubar::{MenubarCommand, MenubarIcon};
 use crate::notifier::{clear_armed_if_rose, decide, post, NotificationKind};
 use crate::paths::Paths;
@@ -89,6 +90,7 @@ impl AppDelegate {
 
 pub fn run_daemon() -> anyhow::Result<()> {
     let mtm = MainThreadMarker::new().expect("must run on main thread");
+    live_state::mark_daemon_running();
     let paths = Paths::standard()?;
     paths.ensure_app_support_dir()?;
 
@@ -146,6 +148,7 @@ pub fn run_daemon() -> anyhow::Result<()> {
     let main_tx_ipc = main_tx.clone();
     let main_tx_menu = main_tx.clone();
     let main_tx_cfg = main_tx.clone();
+    let live = live_state::handle();
     rt.spawn(async move {
         let mut last_percent: u8 = 0;
         let mut last_charging = ChargingState::Unknown;
@@ -186,10 +189,19 @@ pub fn run_daemon() -> anyhow::Result<()> {
                 ev = bat_rx.recv() => {
                     let Ok(ev) = ev else { continue };
                     match ev {
-                        BatteryEvent::Connected { name } => {
-                            device_name = name;
+                        BatteryEvent::Connected { name, identifier } => {
+                            device_name = name.clone();
+                            last_percent = 0;
+                            last_charging = ChargingState::Unknown;
                             connected_count += 1;
                             hide_at = None;
+                            live.store(Arc::new(LiveDeviceState {
+                                connected: true,
+                                device_name: Some(name),
+                                identifier: Some(identifier),
+                                last_percent: None,
+                                charging: ChargingState::Unknown,
+                            }));
                             tracing::info!(connected_count, have_reading, visible, "app: BatteryEvent::Connected");
                             if have_reading && !visible {
                                 visible = true;
@@ -198,6 +210,7 @@ pub fn run_daemon() -> anyhow::Result<()> {
                         }
                         BatteryEvent::Disconnected => {
                             connected_count = connected_count.saturating_sub(1);
+                            live.store(Arc::new(LiveDeviceState::default()));
                             tracing::info!(connected_count, visible, "app: BatteryEvent::Disconnected");
                             if connected_count == 0 && visible {
                                 hide_at = Some(tokio::time::Instant::now() + HIDE_GRACE);
@@ -215,6 +228,11 @@ pub fn run_daemon() -> anyhow::Result<()> {
                                 last_charging,
                                 &device_name,
                             );
+                            let cur = live.load_full();
+                            live.store(Arc::new(LiveDeviceState {
+                                last_percent: Some(p),
+                                ..(*cur).clone()
+                            }));
                             let _ = main_tx_bat.send(MainMsg::Render {
                                 percent: last_percent,
                                 charging: last_charging,
@@ -236,6 +254,11 @@ pub fn run_daemon() -> anyhow::Result<()> {
                                 last_charging,
                                 &device_name,
                             );
+                            let cur = live.load_full();
+                            live.store(Arc::new(LiveDeviceState {
+                                charging: c,
+                                ..(*cur).clone()
+                            }));
                             let _ = main_tx_bat.send(MainMsg::Render {
                                 percent: last_percent,
                                 charging: last_charging,

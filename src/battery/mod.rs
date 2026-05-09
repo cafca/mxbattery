@@ -7,7 +7,7 @@ pub mod mock;
 
 #[derive(Clone, Debug)]
 pub enum BatteryEvent {
-    Connected { name: String },
+    Connected { name: String, identifier: String },
     Percent(u8),
     Charging(ChargingState),
     Disconnected,
