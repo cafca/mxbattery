@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 22" width="16" height="22" role="img" aria-label="MXBattery full-100 charging">
+  <defs>
+    <clipPath id="mx-full-100-c-clip"><path d="M8 2.4 C 12.2 2.4 13.6 5.6 13.6 11 C 13.6 16.6 12.0 19.6 8 19.6 C 4.0 19.6 2.4 16.6 2.4 11 C 2.4 5.6 3.8 2.4 8 2.4 Z"></path></clipPath>
+    <clipPath id="mx-full-100-c-above"><rect x="0" y="0" width="16" height="2"></rect></clipPath>
+    <mask id="mx-full-100-c-mask">
+      <rect width="16" height="22" fill="white"></rect>
+      <line x1="8" y1="4.4" x2="8" y2="7.4" stroke="black" stroke-width="1.4" stroke-linecap="round"></line>
+      <path d="M3.4 0 L0 5.2 L2.6 5.2 L1.2 9.4 L5 4 L2.4 4 L3.6 0 Z" transform="translate(5.5 8.8)" fill="black"></path>
+    </mask>
+  </defs>
+  <rect x="2" y="2" width="12" height="18" fill="var(--mxb-green, oklch(0.66 0.16 148))" clip-path="url(#mx-full-100-c-clip)" mask="url(#mx-full-100-c-mask)"></rect>
+  <path d="M8 2.4 C 12.2 2.4 13.6 5.6 13.6 11 C 13.6 16.6 12.0 19.6 8 19.6 C 4.0 19.6 2.4 16.6 2.4 11 C 2.4 5.6 3.8 2.4 8 2.4 Z" fill="none" stroke="currentColor" stroke-width="1.3"></path>
+  <line x1="8" y1="4.4" x2="8" y2="7.4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" clip-path="url(#mx-full-100-c-above)"></line>
+  <path d="M3.4 0 L0 5.2 L2.6 5.2 L1.2 9.4 L5 4 L2.4 4 L3.6 0 Z" transform="translate(5.5 8.8)" fill="var(--mxb-bright, oklch(0.97 0 0))"></path>
+</svg>
