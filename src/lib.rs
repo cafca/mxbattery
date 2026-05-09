@@ -19,6 +19,24 @@ pub mod state;
 
 pub fn run() -> anyhow::Result<()> {
     logging::init();
+
+    // If a daemon is already running, surface the prefs window via IPC and
+    // exit. This makes double-clicking MXBattery.app (the LSUIElement
+    // re-launch path) reach the prefs even when the menu bar icon is hidden.
+    let paths = paths::Paths::standard()?;
+    let sock = paths.control_socket();
+    if let Ok(rt) = tokio::runtime::Runtime::new() {
+        if rt
+            .block_on(async { ipc::send_open_prefs(&sock).await })
+            .is_ok()
+        {
+            tracing::info!(
+                "another mxbattery instance is running; sent open_prefs IPC and exiting"
+            );
+            return Ok(());
+        }
+    }
+
     tracing::info!(version = %env!("CARGO_PKG_VERSION"), "mxbattery starting");
     #[cfg(target_os = "macos")]
     {

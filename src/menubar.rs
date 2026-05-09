@@ -352,7 +352,21 @@ fn draw_bolt() {
             path.lineToPoint(*p);
         }
         path.closePath();
-        NSColor::controlTextColor().setFill();
-        path.fill();
+
+        // We're drawing a template image (alpha-only). When the battery is
+        // mostly full, the fill underneath the bolt has alpha=1 and a solid
+        // bolt drawn on top would be invisible. Cut a bolt-shaped hole
+        // through the fill instead by using Clear compositing.
+        if let Some(ctx) = objc2_app_kit::NSGraphicsContext::currentContext() {
+            ctx.saveGraphicsState();
+            ctx.setCompositingOperation(objc2_app_kit::NSCompositingOperation::Clear);
+            path.fill();
+            ctx.restoreGraphicsState();
+        } else {
+            // Fallback: just fill with foreground; won't be visible at high
+            // levels but at least correct at low fills.
+            NSColor::controlTextColor().setFill();
+            path.fill();
+        }
     }
 }

@@ -7,7 +7,12 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use block2::RcBlock;
-use objc2_foundation::{MainThreadMarker, NSRunLoop, NSTimer};
+use objc2::mutability::MainThreadOnly;
+use objc2::rc::Retained;
+use objc2::runtime::ProtocolObject;
+use objc2::{declare_class, msg_send_id, ClassType, DeclaredClass};
+use objc2_app_kit::NSApplicationDelegate;
+use objc2_foundation::{MainThreadMarker, NSObject, NSObjectProtocol, NSRunLoop, NSTimer};
 
 use crate::battery::{cb::CbBackend, BatteryBackend, BatteryEvent};
 use crate::config::ConfigWatcher;
@@ -25,6 +30,7 @@ enum MainMsg {
     },
     OpenPrefs,
     SetMuted(bool),
+    SetMenubarEnabled(bool),
     Quit,
 }
 
@@ -35,6 +41,49 @@ fn next_local_midnight(now: chrono::DateTime<chrono::Local>) -> chrono::DateTime
         .unwrap()
         .and_local_timezone(chrono::Local)
         .unwrap()
+}
+
+declare_class!(
+    /// NSApp delegate. We only implement `applicationShouldHandleReopen:` so
+    /// that double-clicking MXBattery.app while the daemon is already running
+    /// (the LSUIElement re-launch path) opens the prefs window instead of
+    /// being silently dropped.
+    struct AppDelegate;
+
+    unsafe impl ClassType for AppDelegate {
+        type Super = NSObject;
+        type Mutability = MainThreadOnly;
+        const NAME: &'static str = "MXBatteryAppDelegate";
+    }
+
+    impl DeclaredClass for AppDelegate {
+        type Ivars = ();
+    }
+
+    unsafe impl AppDelegate {
+        #[method(applicationShouldHandleReopen:hasVisibleWindows:)]
+        fn application_should_handle_reopen(
+            &self,
+            _sender: *mut NSObject,
+            _has_visible: bool,
+        ) -> bool {
+            tracing::info!("app: reopen requested — opening prefs");
+            if let Some(mtm) = MainThreadMarker::new() {
+                crate::prefs_ui::PrefsWindow::show_or_focus(mtm);
+            }
+            true
+        }
+    }
+
+    unsafe impl NSObjectProtocol for AppDelegate {}
+    unsafe impl NSApplicationDelegate for AppDelegate {}
+);
+
+impl AppDelegate {
+    fn new(mtm: MainThreadMarker) -> Retained<Self> {
+        let this = mtm.alloc::<Self>().set_ivars(());
+        unsafe { msg_send_id![super(this), init] }
+    }
 }
 
 pub fn run_daemon() -> anyhow::Result<()> {
@@ -61,18 +110,33 @@ pub fn run_daemon() -> anyhow::Result<()> {
     let backend = CbBackend::start(cfg_handle.load_full().device.clone(), mtm);
     let mut bat_rx = backend.subscribe();
 
-    let menubar = MenubarIcon::install(mtm);
-
     // Set up a channel for the tokio task to send messages to the main thread.
     let (main_tx, main_rx) = tokio::sync::mpsc::unbounded_channel::<MainMsg>();
 
     // Wire the menubar click items to send commands back into the tokio task.
+    // The same sender is reused if the menubar is reinstalled later.
     let (menubar_tx, mut menubar_rx) = tokio::sync::mpsc::unbounded_channel::<MenubarCommand>();
-    menubar.set_command_channel(menubar_tx);
+
+    // Install the menubar only if config asks for it; we may add/remove it
+    // dynamically later when the user toggles the preference.
+    let initial_menubar_enabled = cfg_handle.load_full().menubar.enabled;
+    let menubar: Option<MenubarIcon> = if initial_menubar_enabled {
+        let mb = MenubarIcon::install(mtm);
+        mb.set_command_channel(menubar_tx.clone());
+        Some(mb)
+    } else {
+        None
+    };
 
     // Set up the NSApplication and policy.
     let app = objc2_app_kit::NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(objc2_app_kit::NSApplicationActivationPolicy::Accessory);
+
+    // Install an NSApp delegate so re-launching MXBattery.app while the daemon
+    // is running opens the prefs window. Held in a local so it isn't dropped
+    // while NSApp holds a weak reference to it.
+    let app_delegate = AppDelegate::new(mtm);
+    app.setDelegate(Some(ProtocolObject::from_ref(&*app_delegate)));
 
     // Glue task: pump backend + ipc events and bridge to main thread.
     let cfg_handle_for_task = cfg_handle.clone();
@@ -80,12 +144,23 @@ pub fn run_daemon() -> anyhow::Result<()> {
     let main_tx_bat = main_tx.clone();
     let main_tx_ipc = main_tx.clone();
     let main_tx_menu = main_tx.clone();
+    let main_tx_cfg = main_tx.clone();
     rt.spawn(async move {
         let mut last_percent: u8 = 0;
         let mut last_charging = ChargingState::Unknown;
         let mut device_name = String::from("Logitech mouse");
+        let mut last_menubar_enabled = cfg_handle_for_task.load_full().menubar.enabled;
+        let mut cfg_tick = tokio::time::interval(std::time::Duration::from_millis(500));
+        cfg_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {
+                _ = cfg_tick.tick() => {
+                    let cur = cfg_handle_for_task.load_full().menubar.enabled;
+                    if cur != last_menubar_enabled {
+                        last_menubar_enabled = cur;
+                        let _ = main_tx_cfg.send(MainMsg::SetMenubarEnabled(cur));
+                    }
+                }
                 ev = bat_rx.recv() => {
                     let Ok(ev) = ev else { continue };
                     match ev {
@@ -162,14 +237,17 @@ pub fn run_daemon() -> anyhow::Result<()> {
     // We wrap `main_rx` in an Arc<Mutex> so it can be moved into the block
     // which must be `'static` (RcBlock captures by value).
     let main_rx = Arc::new(std::sync::Mutex::new(main_rx));
-    let menubar_ptr: *const MenubarIcon = &menubar;
-    // SAFETY: `menubar` outlives the timer because we only call `app.run()` while
-    // both are alive, and the timer is invalidated when `app.run()` returns (the
-    // run loop is torn down).
+    // The timer block owns the menubar slot so it can install/remove on the
+    // main thread when the preference toggles. RefCell + Option models the
+    // present/absent states; everything inside runs on the main run loop.
+    let menubar_slot = std::rc::Rc::new(std::cell::RefCell::new(menubar));
+    // Track the most recent battery reading so we can render after a fresh install.
+    let last_reading = std::rc::Rc::new(std::cell::Cell::new((0u8, ChargingState::Unknown)));
     let timer_block = {
         let main_rx = Arc::clone(&main_rx);
-        // SAFETY: menubar_ptr points to a stack local that lives for the rest
-        // of `run_daemon` (past the NSApp run loop).
+        let menubar_slot = std::rc::Rc::clone(&menubar_slot);
+        let menubar_tx = menubar_tx.clone();
+        let last_reading = std::rc::Rc::clone(&last_reading);
         RcBlock::new(move |_timer: NonNull<NSTimer>| {
             let mtm_inner = match MainThreadMarker::new() {
                 Some(m) => m,
@@ -179,16 +257,39 @@ pub fn run_daemon() -> anyhow::Result<()> {
             while let Ok(msg) = rx.try_recv() {
                 match msg {
                     MainMsg::Render { percent, charging } => {
-                        // SAFETY: menubar_ptr is valid (see above).
-                        unsafe { (*menubar_ptr).render(percent, charging, mtm_inner) };
+                        last_reading.set((percent, charging));
+                        if let Some(mb) = menubar_slot.borrow().as_ref() {
+                            mb.render(percent, charging, mtm_inner);
+                        }
                     }
                     MainMsg::OpenPrefs => {
                         tracing::info!("app: dispatching OpenPrefs to PrefsWindow on main thread");
                         crate::prefs_ui::PrefsWindow::show_or_focus(mtm_inner);
                     }
                     MainMsg::SetMuted(muted) => {
-                        // SAFETY: menubar_ptr is valid (see above).
-                        unsafe { (*menubar_ptr).set_muted(muted) };
+                        if let Some(mb) = menubar_slot.borrow().as_ref() {
+                            mb.set_muted(muted);
+                        }
+                    }
+                    MainMsg::SetMenubarEnabled(enabled) => {
+                        let mut slot = menubar_slot.borrow_mut();
+                        match (enabled, slot.is_some()) {
+                            (true, false) => {
+                                tracing::info!("menubar: install (config toggled on)");
+                                let mb = MenubarIcon::install(mtm_inner);
+                                mb.set_command_channel(menubar_tx.clone());
+                                let (p, c) = last_reading.get();
+                                mb.render(p, c, mtm_inner);
+                                *slot = Some(mb);
+                            }
+                            (false, true) => {
+                                tracing::info!("menubar: remove (config toggled off)");
+                                if let Some(mb) = slot.take() {
+                                    mb.remove();
+                                }
+                            }
+                            _ => {}
+                        }
                     }
                     MainMsg::Quit => {
                         tracing::info!("app: terminating on user request");
@@ -214,7 +315,9 @@ pub fn run_daemon() -> anyhow::Result<()> {
     // Invalidate the timer after the run loop exits so it doesn't fire again.
     unsafe { timer.invalidate() };
 
-    drop(menubar);
+    // Drop the menubar slot (and the menubar inside, if any).
+    drop(menubar_slot);
+    drop(app_delegate);
     Ok(())
 }
 

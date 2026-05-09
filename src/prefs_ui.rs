@@ -43,8 +43,6 @@ struct PrefsTargetIvars {
     warn_field: Cell<*mut NSTextField>,
     critical_stepper: Cell<*mut NSStepper>,
     critical_field: Cell<*mut NSTextField>,
-    rearm_stepper: Cell<*mut NSStepper>,
-    rearm_field: Cell<*mut NSTextField>,
 
     // Cadence (minutes)
     critical_period_stepper: Cell<*mut NSStepper>,
@@ -63,6 +61,10 @@ struct PrefsTargetIvars {
     // Original warn_period from the config loaded at form-open time.
     // Preserved so Save doesn't clobber it with a hardcoded 24h value.
     original_warn_period: Mutex<Duration>,
+
+    // Original rearm_hysteresis from the config. Not exposed in the UI;
+    // power users edit it via config.toml directly.
+    original_rearm_hysteresis: Cell<u8>,
 
     // Original autostart.enabled so Save can detect changes and call launchd.
     original_autostart_enabled: Cell<bool>,
@@ -150,8 +152,6 @@ impl PrefsTarget {
             warn_field: Cell::new(std::ptr::null_mut()),
             critical_stepper: Cell::new(std::ptr::null_mut()),
             critical_field: Cell::new(std::ptr::null_mut()),
-            rearm_stepper: Cell::new(std::ptr::null_mut()),
-            rearm_field: Cell::new(std::ptr::null_mut()),
             critical_period_stepper: Cell::new(std::ptr::null_mut()),
             critical_period_field: Cell::new(std::ptr::null_mut()),
             menubar_check: Cell::new(std::ptr::null_mut()),
@@ -159,6 +159,7 @@ impl PrefsTarget {
             save_button: Cell::new(std::ptr::null_mut()),
             window: Cell::new(std::ptr::null_mut()),
             original_warn_period: Mutex::new(Duration::from_secs(24 * 60 * 60)),
+            original_rearm_hysteresis: Cell::new(5),
             original_autostart_enabled: Cell::new(false),
         };
         let this = mtm.alloc::<Self>().set_ivars(ivars);
@@ -267,7 +268,7 @@ impl PrefsTarget {
 
             let warn = (*self.ivars().warn_stepper.get()).doubleValue() as u8;
             let critical = (*self.ivars().critical_stepper.get()).doubleValue() as u8;
-            let rearm_hysteresis = (*self.ivars().rearm_stepper.get()).doubleValue() as u8;
+            let rearm_hysteresis = self.ivars().original_rearm_hysteresis.get();
             let period_mins = (*self.ivars().critical_period_stepper.get()).doubleValue() as u64;
 
             let menubar_enabled =
@@ -311,10 +312,6 @@ impl PrefsTarget {
             (
                 self.ivars().critical_stepper.get(),
                 self.ivars().critical_field.get(),
-            ),
-            (
-                self.ivars().rearm_stepper.get(),
-                self.ivars().rearm_field.get(),
             ),
             (
                 self.ivars().critical_period_stepper.get(),
@@ -448,11 +445,9 @@ impl PrefsTarget {
                 self.ivars().critical_field,
                 t.critical as f64
             );
-            set_stepper_field!(
-                self.ivars().rearm_stepper,
-                self.ivars().rearm_field,
-                t.rearm_hysteresis as f64
-            );
+            self.ivars()
+                .original_rearm_hysteresis
+                .set(t.rearm_hysteresis);
             let period_mins = (cfg.cadence.critical_period.as_secs() / 60) as f64;
             set_stepper_field!(
                 self.ivars().critical_period_stepper,
@@ -688,24 +683,6 @@ fn build_prefs_window(
     );
     let crit_row = hstack(&[&*crit_label, &*crit_stepper, &*crit_field], 6.0, mtm);
 
-    // --- Re-arm hysteresis ---
-    let rearm_label = make_label("Re-arm hysteresis:", mtm);
-    let rearm_stepper = make_int_stepper(
-        1.0,
-        20.0,
-        cfg.thresholds.rearm_hysteresis as f64,
-        &target,
-        sel!(onThresholdChanged:),
-        mtm,
-    );
-    let rearm_field = make_int_field(
-        cfg.thresholds.rearm_hysteresis as f64,
-        &target,
-        sel!(onThresholdChanged:),
-        mtm,
-    );
-    let rearm_row = hstack(&[&*rearm_label, &*rearm_stepper, &*rearm_field], 6.0, mtm);
-
     // --- Critical re-notify period (minutes) ---
     let period_mins = (cfg.cadence.critical_period.as_secs() / 60) as f64;
     let period_label = make_label("Critical re-notify (min):", mtm);
@@ -814,14 +791,6 @@ fn build_prefs_window(
         .set(Retained::as_ptr(&crit_field) as *mut _);
     target
         .ivars()
-        .rearm_stepper
-        .set(Retained::as_ptr(&rearm_stepper) as *mut _);
-    target
-        .ivars()
-        .rearm_field
-        .set(Retained::as_ptr(&rearm_field) as *mut _);
-    target
-        .ivars()
         .critical_period_stepper
         .set(Retained::as_ptr(&period_stepper) as *mut _);
     target
@@ -861,7 +830,6 @@ fn build_prefs_window(
             &*warn_row,
             &*crit_check,
             &*crit_row,
-            &*rearm_row,
             &*period_row,
             &*menubar_check,
             &*autostart_check,
