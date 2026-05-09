@@ -17,7 +17,6 @@ pub fn install(app_bundle_path: &str) -> anyhow::Result<()> {
         <string>{exe}</string>
     </array>
     <key>RunAtLoad</key><true/>
-    <key>KeepAlive</key><true/>
     <key>StandardOutPath</key><string>{out}</string>
     <key>StandardErrorPath</key><string>{err}</string>
 </dict>
